@@ -1,0 +1,31 @@
+This repository redistributes and combines third-party software.
+
+The VMEC++ solver sources amalgamated into vmecpp_amalgamated.cc, together with
+the amalgamation script, build files, and documentation in this repository, are
+provided under the MIT License (below). The abscab routines inlined into
+vmecpp_amalgamated.cc are provided under the Apache License, Version 2.0.
+
+Full license texts are in THIRD_PARTY_LICENSES/. See NOTICE for attribution and
+the provenance of each component.
+
+================================ MIT License ================================
+
+Copyright (c) 2024-present Proxima Fusion GmbH <info@proximafusion.com> (VMEC++)
+Copyright (c) 2026 Charles Norton (amalgamation script, build files, docs)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

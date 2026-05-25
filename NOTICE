@@ -1,0 +1,26 @@
+VMEC++ single-file amalgamation
+===============================
+
+This is an unofficial redistribution of VMEC++ in single-translation-unit form.
+It is not affiliated with or endorsed by Proxima Fusion.
+
+Components
+----------
+
+VMEC++  -  https://github.com/proximafusion/vmecpp
+    MIT License, Copyright (c) 2024-present Proxima Fusion GmbH.
+    Amalgamated from commit 1721a877 (v0.5.4+). The sources are inlined with
+    only mechanical transformations: project headers are pasted in dependency
+    order, and the optional FFTX/SPIRAL transform path (guarded by
+    VMECPP_USE_FFTX) is dropped, which leaves VMEC++'s default partial-DFT
+    path in place. No algorithmic changes were made.
+
+abscab  -  https://github.com/jonathanschilling/abscab-cpp
+    Apache License, Version 2.0, Copyright (c) Jonathan Schilling.
+    abscab/abscab.hh and abscab/abscab.cc (commit 5cfa473b) are inlined
+    unmodified. A copy of the Apache License 2.0 is at
+    THIRD_PARTY_LICENSES/abscab-Apache-2.0.txt.
+
+Build-time dependencies, fetched or found at build time and not redistributed
+in this repository: Eigen, abseil-cpp, nlohmann/json, HDF5, NetCDF, LAPACK,
+OpenMP. Each remains under its own license.

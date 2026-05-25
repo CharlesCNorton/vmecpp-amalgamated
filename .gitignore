@@ -1,0 +1,17 @@
+# build trees
+/build/
+build*/
+_deps/
+
+# compiled objects / binaries
+*.o
+*.obj
+*.a
+vmecpp
+
+# VMEC++ run output
+*.out.h5
+
+# editor / OS cruft
+.DS_Store
+*.swp
