@@ -1,9 +1,9 @@
 # Build the VMEC++ single-file amalgamation.
 #
-# Fetches the dependencies VMEC++ pins (Eigen 5.0.1, abseil-cpp @ 4447c756,
+# Fetches the dependencies VMEC++ pins (Eigen 5.0.1, abseil-cpp 20260107.1,
 # nlohmann/json 3.11.3) so the result matches upstream bit-for-bit, and uses
-# the system HDF5 (C++ API), NetCDF, LAPACK and OpenMP. abscab is already
-# inlined into vmecpp_amalgamated.cc, so it is not fetched here.
+# the system HDF5 (C++ API), NetCDF and OpenMP. abscab is already inlined into
+# vmecpp_amalgamated.cc, so it is not fetched here.
 #
 #   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build -j
@@ -25,9 +25,20 @@ endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-math-errno")
 
+# VMEC++ pins Eigen's alignment rather than letting -march raise it, so that
+# builds for different ISAs stay interchangeable. Same setting here.
+add_compile_definitions(EIGEN_MAX_ALIGN_BYTES=32 EIGEN_MAX_STATIC_ALIGN_BYTES=32)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT VMECPP_IPO_SUPPORTED OUTPUT VMECPP_IPO_ERROR)
+if(VMECPP_IPO_SUPPORTED)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+else()
+  message(STATUS "LTO unavailable, building without it: ${VMECPP_IPO_ERROR}")
+endif()
+
 find_package(OpenMP REQUIRED)
 find_package(HDF5 REQUIRED COMPONENTS C CXX)
-find_package(LAPACK REQUIRED)
 
 # netCDF: prefer its CMake package, fall back to pkg-config (as VMEC++ does).
 find_package(netCDF QUIET)
@@ -45,7 +56,10 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
 endif()
 
-# Eigen (header-only): pinned to the version VMEC++ fetches.
+# Eigen (header-only): pinned to the version VMEC++ fetches. The only dense
+# solve in VMEC++ is Eigen::PartialPivLU, which is pure C++, so there is no
+# LAPACK or BLAS dependency as long as EIGEN_USE_LAPACKE / EIGEN_USE_BLAS /
+# EIGEN_USE_MKL stay undefined.
 FetchContent_Declare(eigen
   GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
   GIT_TAG 5.0.1
@@ -58,14 +72,15 @@ FetchContent_Declare(nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
 FetchContent_MakeAvailable(nlohmann_json)
 
-# abseil-cpp: pinned commit; must provide absl/log (apt's 2022 release does not).
-# A system abseil new enough for absl/log also works via find_package(absl).
+# abseil-cpp 20260107.1 LTS, the commit VMEC++ pins; must provide absl/log
+# (apt's 2022 release does not). A system abseil new enough for absl/log also
+# works via find_package(absl).
 set(ABSL_PROPAGATE_CXX_STD ON)
 set(ABSL_ENABLE_INSTALL OFF)
 set(BUILD_TESTING OFF)
 FetchContent_Declare(absl
   GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-  GIT_TAG 4447c7562e3bc702ade25105912dce503f0c4010
+  GIT_TAG 255c84dadd029fd8ad25c5efb5933e47beaa00c7
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(absl)
 
@@ -82,7 +97,6 @@ target_link_libraries(vmecpp PRIVATE
   ${HDF5_CXX_LIBRARIES} ${HDF5_LIBRARIES}
   ${NETCDF_LINK}
   nlohmann_json::nlohmann_json
-  LAPACK::LAPACK
   absl::algorithm absl::base absl::synchronization absl::strings
   absl::str_format absl::log absl::string_view absl::check
   absl::status absl::statusor

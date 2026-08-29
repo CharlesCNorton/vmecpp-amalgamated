@@ -7,8 +7,8 @@ NetCDF, nlohmann/json, OpenMP) are left in place, their own include guards
 making repetition free. abscab (Apache-2.0) is not header-only -- abscab.hh
 holds declarations and abscab.cc the definitions -- so both are inlined.
 
-The FFTX-accelerated transform path (VMECPP_USE_FFTX) is dropped, keeping the
-byte-identical partial-DFT path VMEC++ uses by default.
+The FFTX-accelerated transform path (VMECPP_USE_FFTX) is dropped, leaving the
+partial-DFT routines VMEC++ falls back to when FFTX is off.
 
 Usage:
   python amalgamate.py \
@@ -30,7 +30,13 @@ from pathlib import Path
 
 INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*([<"])([^>"]+)[>"]')
 
-# Library TUs relative to the cpp root; vmec_standalone (the sole main()) last.
+# Library TUs relative to the cpp root, mirroring the vmecpp_sources list the
+# upstream CMakeLists assemble; vmec_standalone (the sole main()) last.
+# fft_toroidal.cc is listed for parity with upstream and strips to nothing here,
+# its whole body sitting behind VMECPP_USE_FFTX. The two Enzyme translation
+# units (exact_force_{jvp,vjp}.cc) are excluded: upstream builds them only under
+# VMECPP_ENABLE_ENZYME, with a Clang/Enzyme plugin, and their uses in
+# ideal_mhd_model.cc sit behind that same define.
 TUS = [
     "util/file_io/file_io.cc",
     "util/hdf5_io/hdf5_io.cc",
@@ -39,8 +45,7 @@ TUS = [
     "util/testing/numerical_comparison_lib.cc",
     "vmecpp/common/composed_types_lib/composed_types_lib.cc",
     "vmecpp/common/flow_control/flow_control.cc",
-    "vmecpp/common/fourier_basis_fast_poloidal/fourier_basis_fast_poloidal.cc",
-    "vmecpp/common/fourier_basis_fast_toroidal/fourier_basis_fast_toroidal.cc",
+    "vmecpp/common/fourier_basis/fourier_basis.cc",
     "vmecpp/common/magnetic_configuration_lib/magnetic_configuration_lib.cc",
     "vmecpp/common/magnetic_field_provider/magnetic_field_provider_lib.cc",
     "vmecpp/common/makegrid_lib/makegrid_lib.cc",
@@ -65,6 +70,7 @@ TUS = [
     "vmecpp/vmec/fourier_velocity/fourier_velocity.cc",
     "vmecpp/vmec/handover_storage/handover_storage.cc",
     "vmecpp/vmec/ideal_mhd_model/dft_toroidal.cc",
+    "vmecpp/vmec/ideal_mhd_model/fft_toroidal.cc",
     "vmecpp/vmec/ideal_mhd_model/ideal_mhd_model.cc",
     "vmecpp/vmec/iteration_logger/iteration_logger.cc",
     "vmecpp/vmec/output_quantities/output_quantities.cc",
@@ -261,16 +267,20 @@ def main():
 // Provenance: {prov}
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
-// complete output suite). The FFTX/SPIRAL kernel path (VMECPP_USE_FFTX) is
-// omitted; the byte-identical partial-DFT path VMEC++ uses by default is kept.
-// Tests, benchmarks, mockups and the pybind module are not included.
+// complete output suite). Two paths upstream keeps behind build defines are
+// left out: the FFTX/SPIRAL toroidal transform (VMECPP_USE_FFTX), leaving the
+// partial-DFT routines VMEC++ falls back to when it is off, and the two Enzyme
+// autodiff translation units (VMECPP_ENABLE_ENZYME), which compile only under a
+// Clang/Enzyme plugin. Tests, benchmarks, mockups, the makegrid CLI and the
+// pybind module are not included.
 //
-// Build-time dependencies (pinned to what VMEC++ fetches, so results match
-// bit-for-bit): Eigen 5.0.1, abseil-cpp @ 4447c756 (must provide absl/log),
-// nlohmann/json 3.11.3, HDF5 (C++ API), NetCDF-C, LAPACK, OpenMP{', abscab @ 5cfa473b (inlined above)' if abscab_inlined else ''}.
+// Build-time dependencies, pinned to what VMEC++ fetches: Eigen 5.0.1,
+// abseil-cpp 20260107.1 (must provide absl/log), nlohmann/json 3.11.3, HDF5
+// (C++ API), NetCDF-C, OpenMP{', abscab @ 5cfa473b (inlined above)' if abscab_inlined else ''}.
 // Build flags mirror VMEC++'s Release build: -O3 -DNDEBUG -fno-math-errno with
-// EIGEN_DONT_PARALLELIZE. The provided CMakeLists.txt fetches the pinned
-// dependencies and builds this file directly.
+// EIGEN_DONT_PARALLELIZE and EIGEN_MAX_ALIGN_BYTES pinned to 32. The provided
+// CMakeLists.txt fetches the pinned dependencies and builds this file
+// directly.
 //
 // Run:
 //   ./vmecpp input.json [n_threads]   # writes input.out.h5

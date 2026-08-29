@@ -10,14 +10,19 @@ Proxima Fusion.
 
 ## What is in the file
 
-`vmecpp_amalgamated.cc` contains the full solver: fixed and free boundary, all
-profile parameterizations, and the complete output suite, plus the standalone
+`vmecpp_amalgamated.cc` contains the full solver: fixed and free boundary,
+stellarator-symmetric and asymmetric (`lasym`) equilibria, all profile
+parameterizations, and the complete output suite, plus the standalone
 command-line `main()`. abscab (the Biot-Savart routines the free-boundary path
 uses) is inlined as well.
 
-The optional FFTX/SPIRAL kernel path (`VMECPP_USE_FFTX`) is omitted. VMEC++
-falls back to a partial-DFT toroidal transform when FFTX is off, and that is the
-path kept here, so the numerics are the ones upstream produces by default.
+Two optional paths that upstream keeps behind build defines are left out. The
+FFTX/SPIRAL toroidal transform (`VMECPP_USE_FFTX`) is dropped, leaving the
+partial-DFT routines VMEC++ falls back to when FFTX is off; upstream's
+`fft_toroidal_test` is what checks the two against each other. The Enzyme
+autodiff translation units (`VMECPP_ENABLE_ENZYME`) are dropped too, since they
+compile only under a Clang/Enzyme plugin, and their call sites in
+`ideal_mhd_model.cc` sit behind that same define.
 
 Tests, benchmarks, mockups, the `makegrid` CLI, and the Python (pybind) module
 are not included.
@@ -31,15 +36,16 @@ cmake --build build -j
 ```
 
 The provided `CMakeLists.txt` fetches the dependencies VMEC++ pins (Eigen 5.0.1,
-abseil-cpp @ `4447c756`, nlohmann/json 3.11.3) and links the system HDF5 (C++
-API), NetCDF, LAPACK and OpenMP. The first configure builds abseil from source,
-which takes a few minutes. abseil must be recent enough to provide `absl/log`;
-the version Ubuntu 22.04/24.04 ships in `libabsl-dev` is too old, which is why
-the build fetches a pinned commit.
+abseil-cpp 20260107.1, nlohmann/json 3.11.3) and links the system HDF5 (C++
+API), NetCDF and OpenMP. The first configure builds abseil from source, which
+takes a few minutes. abseil must be recent enough to provide `absl/log`, which
+the version Ubuntu 22.04/24.04 ships in `libabsl-dev` is not, hence the pinned
+fetch.
 
 A direct compile without CMake works too, given the include and link flags for
 those libraries, at `-std=c++20 -O3 -DNDEBUG -fno-math-errno -fopenmp
--DEIGEN_DONT_PARALLELIZE`.
+-DEIGEN_DONT_PARALLELIZE -DEIGEN_MAX_ALIGN_BYTES=32
+-DEIGEN_MAX_STATIC_ALIGN_BYTES=32`.
 
 ## Run
 
@@ -56,14 +62,15 @@ upstream's `indata2json` tool.
 ## How it is generated
 
 `amalgamate.py` produces `vmecpp_amalgamated.cc` from a VMEC++ checkout and an
-abscab checkout. It inlines each project header once in dependency order, leaves
-external includes in place, inlines `abscab.hh`/`abscab.cc`, and drops the
-`VMECPP_USE_FFTX` branches.
+abscab checkout. Its translation-unit list mirrors the `vmecpp_sources` list
+upstream's CMakeLists assemble. It inlines each project header once in
+dependency order, leaves external includes in place, inlines
+`abscab.hh`/`abscab.cc`, and drops the `VMECPP_USE_FFTX` branches.
 
 ```sh
 git clone https://github.com/proximafusion/vmecpp
 git clone https://github.com/jonathanschilling/abscab-cpp
-git -C abscab-cpp checkout 5cfa473b90aab06d7f70d986da0c46c46c1ebe9c
+git -C abscab-cpp checkout 5cfa473b90aab06d7f70d986da0c46c46c1ebe9c  # v1.0.3
 
 python amalgamate.py \
     --cpp-root vmecpp/src/vmecpp/cpp \
@@ -73,15 +80,25 @@ python amalgamate.py \
 
 ## Verification
 
-Checked against a conventional multi-file build of the same sources, compiled
-with identical flags and pinned dependency versions, by running both
-single-threaded and comparing the output HDF5 dataset by dataset
-(`tools/compare_outputs.py`):
+Checked against a conventional multi-file build of the same sources: upstream's
+own CMake build at the same commit, configured with `-DVMECPP_USE_FFTX=OFF` so
+both binaries take the partial-DFT path, both compiled by GCC 13.3 against the
+pinned dependency versions. Every case in upstream's `test_data` was run
+single-threaded by both binaries and the resulting HDF5 files compared dataset
+by dataset with `tools/compare_outputs.py`.
 
-- `solovev` (fixed boundary): all 434 datasets identical.
-- `cth_like_free_bdy` (free boundary): 433 of 434 identical; the remaining one
-  is a diagnostic array element that is run-to-run nondeterministic in upstream
-  VMEC++ as well.
+All 16 cases came out bit-for-bit identical, 436 datasets each and 440 for the
+two `lasym` cases, with no differing values. They cover
+fixed boundary (`solovev`, `solovev_analytical`, `solovev_no_axis`,
+`circular_tokamak`, `cma`, `near_axis_iota_nfp4`, `li383_low_res`,
+`cth_like_fixed_bdy`, `cth_like_fixed_bdy_nzeta_37`,
+`cth_like_fixed_bdy_spline_pressure`, `up_down_asym`) and free boundary
+(`solovev_free_bdy`, `solovev_free_bdy_lforbal`, `cth_like_free_bdy`,
+`cth_like_free_bdy_multigrid`, `cth_like_free_bdy_asym`), and between them the
+asymmetric solver, spline-parameterized pressure, multigrid `ns` sequences, the
+guessed magnetic axis, and the free-boundary Nestor and abscab paths.
+
+The file also compiles and runs under Clang 18.
 
 Single-threaded runs are deterministic. With multiple threads, OpenMP reductions
 sum in nondeterministic order, so the last bits can vary between runs, as in

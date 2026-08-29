@@ -9,18 +9,19 @@ Components
 
 VMEC++  -  https://github.com/proximafusion/vmecpp
     MIT License, Copyright (c) 2024-present Proxima Fusion GmbH.
-    Amalgamated from commit 1721a877 (v0.5.4+). The sources are inlined with
+    Amalgamated from commit 6d83563c (v0.7.3+9). The sources are inlined with
     only mechanical transformations: project headers are pasted in dependency
-    order, and the optional FFTX/SPIRAL transform path (guarded by
-    VMECPP_USE_FFTX) is dropped, which leaves VMEC++'s default partial-DFT
-    path in place. No algorithmic changes were made.
+    order, and two optional paths are compiled out, the FFTX/SPIRAL transform
+    (guarded by VMECPP_USE_FFTX), which leaves the partial-DFT path VMEC++ uses
+    when FFTX is off, and the Enzyme autodiff translation units (guarded by
+    VMECPP_ENABLE_ENZYME). No algorithmic changes were made.
 
 abscab  -  https://github.com/jonathanschilling/abscab-cpp
     Apache License, Version 2.0, Copyright (c) Jonathan Schilling.
-    abscab/abscab.hh and abscab/abscab.cc (commit 5cfa473b) are inlined
-    unmodified. A copy of the Apache License 2.0 is at
+    abscab/abscab.hh and abscab/abscab.cc (commit 5cfa473b, tag v1.0.3) are
+    inlined unmodified. A copy of the Apache License 2.0 is at
     THIRD_PARTY_LICENSES/abscab-Apache-2.0.txt.
 
 Build-time dependencies, fetched or found at build time and not redistributed
-in this repository: Eigen, abseil-cpp, nlohmann/json, HDF5, NetCDF, LAPACK,
-OpenMP. Each remains under its own license.
+in this repository: Eigen, abseil-cpp, nlohmann/json, HDF5, NetCDF, OpenMP.
+Each remains under its own license.
