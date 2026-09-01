@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.3-9-g6d83563c
+// Provenance: github.com/proximafusion/vmecpp v0.7.3-25-gb10c06fd
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -9298,8 +9298,11 @@ absl::Status VectorPotential(
   // as abscab methods only add and do not initialize
   std::vector<double> vector_potential_1d(number_evaluation_positions * 3, 0.0);
 
-  // FIXME(jons): Figure out what the actual sign definition must be.
-  // For now, adjusted to agree with MAKEGRID.
+  // Negated because abscab's circular-filament vector potential has the
+  // opposite sign convention to its polygon-filament one and to both of its
+  // magnetic-field routines. With the negation, A is parallel to the current
+  // that produces it, which agrees with MAKEGRID and with the closed form
+  // checked in VectorPotential.CheckCircularFilament.
   abscab::vectorPotentialCircularFilament(center.data(), normal.data(), radius,
                                           -current, number_evaluation_positions,
                                           evaluation_positions_1d.data(),
@@ -9765,11 +9768,6 @@ using magnetics::NumWindingsToCircuitCurrents;
 using magnetics::SetCircuitCurrents;
 using magnetics::VectorPotential;
 
-// TODO(jons): implement stellarator-symmetric grid and follow-up flip-mirroring
-// of magnetic quantities NOTE: For now, everything here is computed as
-// non-stellarator-symmetric,
-//       so there is a factor of ~2 speedup around the corner.
-
 absl::Status IsValidMakegridParameters(
     const MakegridParameters& makegrid_parameters) {
   // number of field periods has to be at least 1
@@ -10038,12 +10036,11 @@ absl::StatusOr<RowMatrix3Xd> MakeCylindricalGrid(
 
   int num_phi_effective = num_phi;
   if (makegrid_parameters.assume_stellarator_symmetry) {
-    if (num_phi % 2 != 0) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "number of toroidal grid points has to be even for being able to "
-          "make use to stellarator symmetry in makegrid, but was num_phi=",
-          num_phi));
-    }
+    // Points 0 .. num_phi/2 are computed and the rest are mirrored onto them by
+    // phi -> -phi, which is index num_phi - idx_phi. An even num_phi puts a
+    // grid point on the half-period plane, where that map is the identity; an
+    // odd one has no such point, and every mirrored index still lands inside
+    // the computed range.
     num_phi_effective = num_phi / 2 + 1;
   }
 
@@ -11128,9 +11125,11 @@ void TridiagonalSolveOpenMP(
 
   for (int j = nsMinF; j < std::min(jMax, nsMaxF); ++j) {
     for (int mn = 0; mn < mnmax; ++mn) {
+      // forward elimination reaches back one surface, so it can only start
+      // one past jMin
       if (j < jMin[mn] + 1) {
         continue;
-      }  // TODO(jons)
+      }
 
       int idx_mn_0 = (j - nsMinF) * mnmax + mn;      //  0
       int idx_mn_m = (j - 1 - nsMinF) * mnmax + mn;  // -1
@@ -11213,9 +11212,11 @@ void TridiagonalSolveOpenMP(
 
   for (int j = std::min(jMax - 2, nsMaxF - 1); j >= nsMinF; --j) {
     for (int mn = 0; mn < mnmax; ++mn) {
+      // back substitution reaches forward instead, so it runs down to jMin
+      // itself
       if (j < jMin[mn]) {
         continue;
-      }  // TODO(jons)
+      }
 
       int idx_mn_p = (j + 1 - nsMinF) * mnmax + mn;  // +1
       int idx_mn_0 = (j - nsMinF) * mnmax + mn;      //  0
@@ -11489,12 +11490,158 @@ std::vector<double> BoundaryFromJson(const nlohmann::json& json,
 #include "absl/strings/str_format.h"
 #include "nlohmann/json.hpp"
 
+// ============================================================================
+// header: vmecpp/vmec/profile_parameterization_data/profile_parameterization_data.h
+// ============================================================================
+// SPDX-FileCopyrightText: 2024-present Proxima Fusion GmbH
+// <info@proximafusion.com>
+//
+// SPDX-License-Identifier: MIT
+#ifndef VMECPP_VMEC_PROFILE_PARAMETERIZATION_DATA_PROFILE_PARAMETERIZATION_DATA_H_
+#define VMECPP_VMEC_PROFILE_PARAMETERIZATION_DATA_PROFILE_PARAMETERIZATION_DATA_H_
+
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+namespace vmecpp {
+
+// number of profile parameterizations
+#define NUM_PARAM 23
+
+enum class ProfileType : std::uint8_t { PRESSURE, CURRENT, IOTA };
+
+struct AllowedFor {
+  bool pres;
+  bool curr;
+  bool iota;
+};
+
+class ProfileParameterizationData {
+ public:
+  ProfileParameterizationData(const std::string& name, bool allowedForPres,
+                              bool allowedForCurr, bool allowedForIota,
+                              bool needsSplineData);
+
+  const std::string& Name() const;
+  bool NeedsSplineData() const;
+  AllowedFor IsAllowedFor() const;
+
+ private:
+  const std::string name_;
+  bool needsSplineData_;
+  AllowedFor allowedFor_;
+};
+
+enum class ProfileParameterization : std::uint8_t {
+  INVALID_PARAM = 0,
+  POWER_SERIES = 1,
+  POWER_SERIES_I = 2,
+  GAUSS_TRUNC = 3,
+  SUM_ATAN = 4,
+  TWO_LORENTZ = 5,
+  TWO_POWER = 6,
+  TWO_POWER_GS = 7,
+  AKIMA_SPLINE = 8,
+  AKIMA_SPLINE_I = 9,
+  AKIMA_SPLINE_IP = 10,
+  CUBIC_SPLINE = 11,
+  CUBIC_SPLINE_I = 12,
+  CUBIC_SPLINE_IP = 13,
+  PEDESTAL = 14,
+  RATIONAL = 15,
+  LINE_SEGMENT = 16,
+  LINE_SEGMENT_I = 17,
+  LINE_SEGMENT_IP = 18,
+  NICE_QUADRATIC = 19,
+  SUM_COSSQ_S = 20,
+  SUM_COSSQ_SQRTS = 21,
+  SUM_COSSQ_S_FREE = 22
+};
+
+// All known parameterizations, indexed by ProfileParameterization.
+const std::vector<ProfileParameterizationData>& AllProfileParameterizations();
+
+// The entry carrying `name`, or nullptr if no parameterization has that name.
+const ProfileParameterizationData* FindProfileParameterization(
+    const std::string& name);
+
+// Whether `name` is a known parameterization that may be used for `type`.
+bool IsProfileParameterizationAllowedFor(const std::string& name,
+                                         ProfileType type);
+
+}  // namespace vmecpp
+
+#endif  // VMECPP_VMEC_PROFILE_PARAMETERIZATION_DATA_PROFILE_PARAMETERIZATION_DATA_H_
+
+
 namespace {
 [[noreturn]] void ErrorToException(const absl::Status& status,
                                    const std::string& context) {
   const std::string msg =
       "There was an error " + context + ":\n" + std::string(status.message());
   throw std::runtime_error(msg);
+}
+
+std::string ProfileTypeName(vmecpp::ProfileType profile_type) {
+  switch (profile_type) {
+    case vmecpp::ProfileType::PRESSURE:
+      return "mass/pressure";
+    case vmecpp::ProfileType::CURRENT:
+      return "current";
+    case vmecpp::ProfileType::IOTA:
+      return "iota";
+  }
+  return "unknown";
+}
+
+// Checks that `type_name` names a profile parameterization that may be used for
+// `profile_type`, and that a spline parameterization was given its knots. An
+// unrecognized name otherwise reaches the solver as a zero profile, which
+// converges to a silently wrong equilibrium.
+//
+// The polynomial coefficient arrays are deliberately not required to be
+// non-empty: they are zero-padded on read, so an empty array is a valid way to
+// specify a zero profile.
+absl::Status CheckProfile(const std::string& type_key,
+                          const std::string& type_name,
+                          vmecpp::ProfileType profile_type,
+                          const std::string& aux_key,
+                          const Eigen::VectorXd& aux_s,
+                          const Eigen::VectorXd& aux_f) {
+  const vmecpp::ProfileParameterizationData* const parameterization =
+      vmecpp::FindProfileParameterization(type_name);
+  if (parameterization == nullptr) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "input variable '%s' is '%s', which is not a known profile "
+        "parameterization\n",
+        type_key, type_name));
+  }
+
+  if (!vmecpp::IsProfileParameterizationAllowedFor(type_name, profile_type)) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "input variable '%s' is '%s', which cannot be used for the %s "
+        "profile\n",
+        type_key, type_name, ProfileTypeName(profile_type)));
+  }
+
+  if (parameterization->NeedsSplineData()) {
+    if (aux_s.size() == 0 || aux_f.size() == 0) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "'%s' is '%s', which is a spline profile, so '%s_aux_s' and "
+          "'%s_aux_f' must be given\n",
+          type_key, type_name, aux_key, aux_key));
+    }
+    if (aux_s.size() != aux_f.size()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "'%s_aux_s' and '%s_aux_f' must have the same number of entries, "
+          "but have %d and %d\n",
+          aux_key, aux_key, aux_s.size(), aux_f.size()));
+    }
+  }
+
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -11779,8 +11926,8 @@ absl::Status VmecINDATA::WriteTo(H5::H5File& file) const {
   WriteH5Dataset(raxis_c, "/indata/raxis_c", file);
   WriteH5Dataset(zaxis_s, "/indata/zaxis_s", file);
   if (lasym) {
-    WriteH5Dataset(raxis_s->value(), "/indata/raxis_s", file);
-    WriteH5Dataset(zaxis_c->value(), "/indata/zaxis_c", file);
+    WriteH5Dataset(*raxis_s, "/indata/raxis_s", file);
+    WriteH5Dataset(*zaxis_c, "/indata/zaxis_c", file);
   }
 
   // 2D matrices
@@ -11788,8 +11935,8 @@ absl::Status VmecINDATA::WriteTo(H5::H5File& file) const {
   WriteH5Dataset(rbc, "/indata/rbc", file);
   WriteH5Dataset(zbs, "/indata/zbs", file);
   if (lasym) {
-    WriteH5Dataset(rbs->value(), "/indata/rbs", file);
-    WriteH5Dataset(zbc->value(), "/indata/zbc", file);
+    WriteH5Dataset(*rbs, "/indata/rbs", file);
+    WriteH5Dataset(*zbc, "/indata/zbc", file);
   }
 
   return absl::OkStatus();
@@ -12667,8 +12814,8 @@ absl::StatusOr<std::string> VmecINDATA::ToJson() const {
   output["raxis_c"] = raxis_c;
   output["zaxis_s"] = zaxis_s;
   if (lasym) {
-    output["raxis_s"] = raxis_s->value();
-    output["zaxis_c"] = zaxis_c->value();
+    output["raxis_s"] = *raxis_s;
+    output["zaxis_c"] = *zaxis_c;
   }
 
   // (Initial Guess for) Boundary Geometry
@@ -12828,15 +12975,13 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
 
   /* --------------------------------- */
 
-  // pmass_type
-  // TODO(jons): check for allowed value
-
-  // am
-  // TODO(jons): must be given for parameterized profiles
-
-  // am_aux_s
-  // am_aux_f
-  // TODO(jons): must be given for spline data profiles
+  // pmass_type, am_aux_s, am_aux_f
+  if (absl::Status status = CheckProfile(
+          "pmass_type", vmec_indata.pmass_type, ProfileType::PRESSURE, "am",
+          vmec_indata.am_aux_s, vmec_indata.am_aux_f);
+      !status.ok()) {
+    return status;
+  }
 
   // pres_scale
   if (vmec_indata.pres_scale < 0) {
@@ -12861,17 +13006,24 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
 
   /* --------------------------------- */
 
+  // piota_type, ai_aux_s, ai_aux_f. Checked for either ncurr: piota is the
+  // initial guess for the iota profile even in a current-constrained run.
+  if (absl::Status status =
+          CheckProfile("piota_type", vmec_indata.piota_type, ProfileType::IOTA,
+                       "ai", vmec_indata.ai_aux_s, vmec_indata.ai_aux_f);
+      !status.ok()) {
+    return status;
+  }
+
+  // pcurr_type, ac_aux_s, ac_aux_f. Ignored for ncurr == 0, still checked.
+  if (absl::Status status = CheckProfile(
+          "pcurr_type", vmec_indata.pcurr_type, ProfileType::CURRENT, "ac",
+          vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
+      !status.ok()) {
+    return status;
+  }
+
   if (vmec_indata.ncurr == 0) {
-    // piota_type
-    // TODO(jons): check for allowed value
-
-    // ai
-    // TODO(jons): must be given for parameterized profiles
-
-    // ai_aux_s
-    // ai_aux_f
-    // TODO(jons): must be given for spline data profiles
-
     if (vmec_indata.bloat != 1.0) {
       // bloat != 1 is only allowed when ncurr == 1 (constrained toroidal
       // current)
@@ -12880,22 +13032,8 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
           "'bloat' must be 1.0 for ncurr == 0 (constrained-iota), but is %g\n",
           vmec_indata.bloat));
     }
-
-  } else if (vmec_indata.ncurr == 1) {
-    // pcurr_type
-    // TODO(jons): check for allowed value
-
-    // ac
-    // TODO(jons): must be given for parameterized profiles
-
-    // ac_aux_s
-    // ac_aux_f
-    // TODO(jons): must be given for spline data profiles
-
-    // curtor --> any value is ok
-
-    // bloat --> any value is ok
   }
+  // ncurr == 1: curtor and bloat may take any value.
 
   /* --------------------------------- */
 
@@ -13153,6 +13291,7 @@ VmecINDATA VmecINDATA::Copy() const { return *this; }
 #include <Eigen/Dense>
 #include <span>
 
+#include "absl/status/status.h"
 
 // ============================================================================
 // header: vmecpp/free_boundary/mgrid_provider/mgrid_provider.h
@@ -13167,6 +13306,7 @@ VmecINDATA VmecINDATA::Copy() const { return *this; }
 #include <Eigen/Dense>
 #include <filesystem>
 
+#include "absl/status/status.h"
 
 namespace vmecpp {
 
@@ -13187,10 +13327,13 @@ class MGridProvider {
                              const Eigen::VectorXd& fixed_bp,
                              const Eigen::VectorXd& fixed_bz);
 
-  void interpolate(int ztMin, int ztMax, int nZeta, const Eigen::VectorXd& r,
-                   const Eigen::VectorXd& z, Eigen::VectorXd& m_interpBr,
-                   Eigen::VectorXd& m_interpBp,
-                   Eigen::VectorXd& m_interpBz) const;
+  // Interpolate [ztMin, ztMax) of nZnT points; error if outside the grid.
+  [[nodiscard]] absl::Status interpolate(int ztMin, int ztMax, int nZeta,
+                                         int nZnT, const Eigen::VectorXd& r,
+                                         const Eigen::VectorXd& z,
+                                         Eigen::VectorXd& m_interpBr,
+                                         Eigen::VectorXd& m_interpBp,
+                                         Eigen::VectorXd& m_interpBz) const;
 
   // mgrid internals below
 
@@ -13219,6 +13362,24 @@ class MGridProvider {
   bool IsLoaded() const { return has_mgrid_loaded_; }
 
  private:
+  // Size the accumulation arrays to the current grid and clear them.
+  void ResetAccumulatedField();
+
+  // Add one circuit's contribution, weighted by its current.
+  // `contribution_at(linear_index)` returns that circuit's {b_r, b_p, b_z} at
+  // one grid point. LoadFile and LoadFields differ only in where the
+  // contribution comes from, so the weighting lives here once.
+  template <typename ContributionAt>
+  void AccumulateCircuit(double coil_current, ContributionAt contribution_at) {
+    const int num_grid_points = numPhi * numZ * numR;
+    for (int linear_index = 0; linear_index < num_grid_points; ++linear_index) {
+      const auto [b_r, b_p, b_z] = contribution_at(linear_index);
+      bR[linear_index] += b_r * coil_current;
+      bP[linear_index] += b_p * coil_current;
+      bZ[linear_index] += b_z * coil_current;
+    }  // linear_index
+  }
+
   bool has_mgrid_loaded_;
   bool has_fixed_field_;
 
@@ -13483,8 +13644,10 @@ class ExternalMagneticField {
   ExternalMagneticField(const Sizes* s, const TangentialPartitioning* tp,
                         const SurfaceGeometry* sg, const MGridProvider* mgrid);
 
-  void update(const std::span<const double> rAxis,
-              const std::span<const double> zAxis, double netToroidalCurrent);
+  // Returns kFailedPrecondition if this thread's slice left the vacuum grid.
+  [[nodiscard]] absl::Status update(const std::span<const double> rAxis,
+                                    const std::span<const double> zAxis,
+                                    double netToroidalCurrent);
 
   // axis geometry around whole machine
   Eigen::VectorXd axisXYZ;
@@ -13603,15 +13766,17 @@ ExternalMagneticField::ExternalMagneticField(const Sizes* s,
 }
 
 // rAxis, zAxis are provided over a single module
-void ExternalMagneticField::update(const std::span<const double> rAxis,
-                                   const std::span<const double> zAxis,
-                                   double netToroidalCurrent) {
+absl::Status ExternalMagneticField::update(const std::span<const double> rAxis,
+                                           const std::span<const double> zAxis,
+                                           double netToroidalCurrent) {
 #ifdef _OPENMP
 #pragma omp barrier
 #endif  // _OPENMP
 
-  mgrid_.interpolate(tp_.ztMin, tp_.ztMax, s_.nZeta, sg_.r1b, sg_.z1b, interpBr,
-                     interpBp, interpBz);
+  // Not returned here: the barriers below are collective over the team.
+  absl::Status interpolation_status =
+      mgrid_.interpolate(tp_.ztMin, tp_.ztMax, s_.nZeta, s_.nZnT, sg_.r1b,
+                         sg_.z1b, interpBr, interpBp, interpBz);
 
 #ifdef _OPENMP
 #pragma omp barrier
@@ -13632,6 +13797,8 @@ void ExternalMagneticField::update(const std::span<const double> rAxis,
 #ifdef _OPENMP
 #pragma omp barrier
 #endif  // _OPENMP
+
+  return interpolation_status;
 }
 
 // add in contribution from net toroidal current along magnetic axis
@@ -14693,10 +14860,12 @@ void LaplaceSolver::SolveForPotential(
 #include <cfloat>  // DBL_MAX
 #include <cstdio>
 #include <fstream>
-#include <iostream>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 
 namespace vmecpp {
@@ -14739,6 +14908,13 @@ absl::Status ValidateFieldContributionShape(
 }
 
 }  // namespace
+
+void MGridProvider::ResetAccumulatedField() {
+  const int num_grid_points = numPhi * numZ * numR;
+  bR.setZero(num_grid_points);
+  bP.setZero(num_grid_points);
+  bZ.setZero(num_grid_points);
+}
 
 MGridProvider::MGridProvider() {
   nfp = -1;
@@ -14853,11 +15029,8 @@ absl::Status MGridProvider::LoadFile(const std::filesystem::path& filename,
 
   mgrid_mode = *mgrid_mode_or;
 
-  // Resize and make sure that the accumulation arrays are reset to zeros
-  // if they contained previous contents from an earlier call to this routine.
-  bR.setZero(numPhi * numZ * numR);
-  bP.setZero(numPhi * numZ * numR);
-  bZ.setZero(numPhi * numZ * numR);
+  // Reset in case an earlier call left contents behind.
+  ResetAccumulatedField();
 
   // combine coil contributions, weighted by coil currents
   for (int i = 0; i < nextcur; ++i) {
@@ -14905,21 +15078,14 @@ absl::Status MGridProvider::LoadFile(const std::filesystem::path& filename,
       return with_context(shape_status);
     }
 
-    for (int index_phi = 0; index_phi < numPhi; ++index_phi) {
-      for (int index_z = 0; index_z < numZ; ++index_z) {
-        for (int index_r = 0; index_r < numR; ++index_r) {
-          const int linear_index =
-              (index_phi * numZ + index_z) * numR + index_r;
-
-          bR[linear_index] +=
-              b_r_contribution[index_phi][index_z][index_r] * coil_currents[i];
-          bP[linear_index] +=
-              b_p_contribution[index_phi][index_z][index_r] * coil_currents[i];
-          bZ[linear_index] +=
-              b_z_contribution[index_phi][index_z][index_r] * coil_currents[i];
-        }  // index_r
-      }  // index_z
-    }  // index_phi
+    AccumulateCircuit(coil_currents[i], [&](int linear_index) {
+      const int index_r = linear_index % numR;
+      const int index_z = (linear_index / numR) % numZ;
+      const int index_phi = linear_index / (numZ * numR);
+      return std::make_tuple(b_r_contribution[index_phi][index_z][index_r],
+                             b_p_contribution[index_phi][index_z][index_r],
+                             b_z_contribution[index_phi][index_z][index_r]);
+    });
   }  // nextcur
 
   if (nc_close(ncid) != NC_NOERR) {
@@ -14965,22 +15131,15 @@ absl::Status MGridProvider::LoadFields(
     mgrid_mode = "R";
   }
 
-  // TODO(eguiraud): factor out this part that is duplicated
-  const int num_grid_points = numPhi * numZ * numR;
-  bR.setZero(num_grid_points);
-  bP.setZero(num_grid_points);
-  bZ.setZero(num_grid_points);
+  ResetAccumulatedField();
 
   // combine coil contributions, weighted by coil currents
   for (int i = 0; i < nextcur; ++i) {
-    for (int linear_index = 0; linear_index < num_grid_points; ++linear_index) {
-      bR[linear_index] +=
-          magnetic_response_table.b_r(i, linear_index) * coil_currents[i];
-      bP[linear_index] +=
-          magnetic_response_table.b_p(i, linear_index) * coil_currents[i];
-      bZ[linear_index] +=
-          magnetic_response_table.b_z(i, linear_index) * coil_currents[i];
-    }  // linear_index
+    AccumulateCircuit(coil_currents[i], [&](int linear_index) {
+      return std::make_tuple(magnetic_response_table.b_r(i, linear_index),
+                             magnetic_response_table.b_p(i, linear_index),
+                             magnetic_response_table.b_z(i, linear_index));
+    });
   }  // nextcur
 
   has_mgrid_loaded_ = true;
@@ -15002,16 +15161,17 @@ void MGridProvider::SetFixedMagneticField(const Eigen::VectorXd& fixed_br,
 }  // SetFixedMagneticField
 
 // interpolate mgrid file at current flux surface
-void MGridProvider::interpolate(int ztMin, int ztMax, int nZeta,
-                                const Eigen::VectorXd& rLCFS,
-                                const Eigen::VectorXd& zLCFS,
-                                Eigen::VectorXd& m_interpBr,
-                                Eigen::VectorXd& m_interpBp,
-                                Eigen::VectorXd& m_interpBz) const {
+absl::Status MGridProvider::interpolate(int ztMin, int ztMax, int nZeta,
+                                        int nZnT, const Eigen::VectorXd& rLCFS,
+                                        const Eigen::VectorXd& zLCFS,
+                                        Eigen::VectorXd& m_interpBr,
+                                        Eigen::VectorXd& m_interpBp,
+                                        Eigen::VectorXd& m_interpBz) const {
   CHECK(has_mgrid_loaded_) << "no mgrid loaded";
 
   if (has_fixed_field_) {
     // quick return: just copy into target storage
+    // Uniform across the team, so skipping the barrier below is safe.
 
     for (int kl = ztMin; kl < ztMax; ++kl) {
       m_interpBr[kl - ztMin] = fixed_br_[kl];
@@ -15019,25 +15179,13 @@ void MGridProvider::interpolate(int ztMin, int ztMax, int nZeta,
       m_interpBz[kl - ztMin] = fixed_bz_[kl];
     }  // kl
 
-    return;
+    return absl::OkStatus();
   }
-
-  double min_r = DBL_MAX;
-  double max_r = -DBL_MAX;
-
-  double min_z = DBL_MAX;
-  double max_z = -DBL_MAX;
 
   bool exceedGridSizeR = false;
   bool exceedGridSizeZ = false;
   for (int kl = ztMin; kl < ztMax; ++kl) {
     int k = kl % nZeta;
-
-    min_r = std::min(min_r, rLCFS[kl]);
-    max_r = std::max(max_r, rLCFS[kl]);
-
-    min_z = std::min(min_z, zLCFS[kl]);
-    max_z = std::max(max_z, zLCFS[kl]);
 
     // check if plasma boundary exceeds pre-computed grid
     if (rLCFS[kl] < minR || rLCFS[kl] > maxR) {
@@ -15083,30 +15231,53 @@ void MGridProvider::interpolate(int ztMin, int ztMax, int nZeta,
         w11 * bZ[kj_i_] + w12 * bZ[kj1i_] + w21 * bZ[kj_i1] + w22 * bZ[kj1i1];
   }  // kl
 
+  absl::Status status = absl::OkStatus();
   if (exceedGridSizeR || exceedGridSizeZ) {
+    // The clamped field no longer represents the coils outside the grid.
     // TODO(jons): automatically evaluate B outside of grid based on coil
     // definitions and Biot-Savart
     // --> will only get slower, but more robust (and accurate?)
     // --> would also require to always have coil geometry inside mgrid file for
     // on-the-fly re-evaluation...
-    // NOTE: This is not suppressed by the `verbose` flag (vmec.cc:Vmec), since
-    // it is considered an error message.
-    std::cerr << "WARNING: Plasma Boundary exceeded Vacuum Grid Size\n";
+    // Global, not per-slice, so the message is the same whoever reports.
+    double min_r = DBL_MAX;
+    double max_r = -DBL_MAX;
+    double min_z = DBL_MAX;
+    double max_z = -DBL_MAX;
+    for (int kl = 0; kl < nZnT; ++kl) {
+      min_r = std::min(min_r, rLCFS[kl]);
+      max_r = std::max(max_r, rLCFS[kl]);
+      min_z = std::min(min_z, zLCFS[kl]);
+      max_z = std::max(max_z, zLCFS[kl]);
+    }  // kl
 
+    std::string exceeded_extents;
     if (exceedGridSizeR) {
-      std::cout << absl::StrFormat("  R: min = % .3e  max = % .3e\n", min_r,
-                                   max_r);
+      exceeded_extents += absl::StrFormat(
+          " R: boundary [% .6e, % .6e] against grid [% .6e, % .6e].", min_r,
+          max_r, minR, maxR);
+    }
+    if (exceedGridSizeZ) {
+      exceeded_extents += absl::StrFormat(
+          " Z: boundary [% .6e, % .6e] against grid [% .6e, % .6e].", min_z,
+          max_z, minZ, maxZ);
     }
 
-    if (exceedGridSizeZ) {
-      std::cout << absl::StrFormat("  Z: min = % .3e  max = % .3e\n", min_z,
-                                   max_z);
-    }
+    // kFailedPrecondition so return_outputs_even_if_not_converged recovers.
+    status = absl::FailedPreconditionError(absl::StrFormat(
+        "MGridProvider::interpolate: the plasma boundary exceeded the vacuum "
+        "field grid, so the interpolated field was clamped to the grid edge "
+        "and is not physically meaningful.%s Enlarge the mgrid domain so that "
+        "it contains the plasma boundary at every iteration.",
+        exceeded_extents));
   }
 
+  // Unconditional: every thread must reach this barrier or the team deadlocks.
 #ifdef _OPENMP
 #pragma omp barrier
 #endif  // _OPENMP
+
+  return status;
 }
 
 }  // namespace vmecpp
@@ -15147,6 +15318,7 @@ void MGridProvider::interpolate(int ztMin, int ztMax, int nZeta,
 #include <span>
 #include <vector>
 
+#include "absl/status/statusor.h"
 
 namespace vmecpp {
 
@@ -15169,7 +15341,8 @@ class FreeBoundaryBase {
         vacuum_b_phi_share_(vacuum_b_phi_share),
         vacuum_b_z_share_(vacuum_b_z_share) {}
 
-  virtual bool update(
+  // True at the debug checkpoint; error status if the vacuum solve failed.
+  virtual absl::StatusOr<bool> update(
       const std::span<const double> rCC, const std::span<const double> rSS,
       const std::span<const double> rSC, const std::span<const double> rCS,
       const std::span<const double> zSC, const std::span<const double> zCS,
@@ -15387,7 +15560,7 @@ class Nestor : public FreeBoundaryBase {
          std::span<double> vacuum_b_phi_share,
          std::span<double> vacuum_b_z_share);
 
-  bool update(
+  absl::StatusOr<bool> update(
       const std::span<const double> rCC, const std::span<const double> rSS,
       const std::span<const double> rSC, const std::span<const double> rCS,
       const std::span<const double> zSC, const std::span<const double> zCS,
@@ -15457,7 +15630,7 @@ Nestor::Nestor(const Sizes* s, const TangentialPartitioning* tp,
   bSubV.setZero(numLocal);
 }
 
-bool Nestor::update(
+absl::StatusOr<bool> Nestor::update(
     const std::span<const double> rCC, const std::span<const double> rSS,
     const std::span<const double> rSC, const std::span<const double> rCS,
     const std::span<const double> zSC, const std::span<const double> zCS,
@@ -15480,7 +15653,9 @@ bool Nestor::update(
     return true;
   }
 
-  ef_.update(rAxis, zAxis, netToroidalCurrent);
+  // Carried to the end: collective regions below must be reached by all.
+  const absl::Status external_field_status =
+      ef_.update(rAxis, zAxis, netToroidalCurrent);
   if (vmec_checkpoint == VmecCheckpoint::VAC1_BEXTERN &&
       at_checkpoint_iteration) {
     return true;
@@ -15686,6 +15861,11 @@ bool Nestor::update(
   // TODO(jons): could move bSubUVac, bSubVVac collection here to spare on
   // barrier
 
+  // All collective regions are done, so it is safe to report now.
+  if (!external_field_status.ok()) {
+    return external_field_status;
+  }
+
   return false;
 }
 
@@ -15735,7 +15915,7 @@ class OnlyCoils : public FreeBoundaryBase {
             std::span<double> vacuum_b_phi_share,
             std::span<double> vacuum_b_z_share);
 
-  bool update(
+  absl::StatusOr<bool> update(
       const std::span<const double> rCC, const std::span<const double> rSS,
       const std::span<const double> rSC, const std::span<const double> rCS,
       const std::span<const double> zSC, const std::span<const double> zCS,
@@ -15762,7 +15942,7 @@ OnlyCoils::OnlyCoils(const Sizes* s, const TangentialPartitioning* tp,
     : FreeBoundaryBase(s, tp, mgrid, bSqVacShare, vacuum_b_r_share,
                        vacuum_b_phi_share, vacuum_b_z_share) {}  // OnlyCoils
 
-bool OnlyCoils::update(
+absl::StatusOr<bool> OnlyCoils::update(
     const std::span<const double> rCC, const std::span<const double> rSS,
     const std::span<const double> rSC, const std::span<const double> rCS,
     const std::span<const double> zSC, const std::span<const double> zCS,
@@ -15779,7 +15959,8 @@ bool OnlyCoils::update(
 
   // blindly assume netToroidalCurrent == 0.0,
   // since checked for that during initialization
-  ef_.update(rAxis, zAxis, 0.0);
+  // Carried to the end for the same reason as in Nestor::update.
+  const absl::Status external_field_status = ef_.update(rAxis, zAxis, 0.0);
 
   // compute net covariant magnetic field components on surface
   double local_bsubuvac = 0.0;
@@ -15834,6 +16015,10 @@ bool OnlyCoils::update(
 
   // TODO(jons): could move bSubUVac, bSubVVac collection here to spare on
   // barrier
+
+  if (!external_field_status.ok()) {
+    return external_field_status;
+  }
 
   return false;
 }  // update
@@ -19115,6 +19300,7 @@ void FourierForces::residuals(Eigen::Vector3d& fRes,
 #include <span>
 #include <vector>
 
+#include "absl/status/status.h"
 
 namespace vmecpp {
 
@@ -19277,6 +19463,10 @@ class HandoverStorage {
   // [nZnT] cylindrical B^Z of Nestor's vacuum magnetic field
   Eigen::VectorXd vacuum_b_z;
 
+  // Fourier coefficients of Nestor's scalar magnetic potential; empty unless
+  // this is a free-boundary run. Reported as `potvac` in the wout file.
+  Eigen::VectorXd vacuum_potential;
+
   // Whether the free-boundary vacuum solve requested an early exit at a
   // debug checkpoint (VmecCheckpoint). The vacuum solve now runs in a nested
   // parallel region driven by a single radial thread, so this shared flag
@@ -19284,6 +19474,9 @@ class HandoverStorage {
   // reads it after the enclosing 'omp single' barrier). Always false during
   // normal runs (checkpoint == NONE).
   bool vacuum_reached_checkpoint = false;
+
+  // First error from the nested vacuum team; reset to OK before each solve.
+  absl::Status vacuum_status = absl::OkStatus();
 
  private:
   const Sizes& s_;
@@ -19301,80 +19494,6 @@ class HandoverStorage {
 }  // namespace vmecpp
 
 #endif  // VMECPP_VMEC_HANDOVER_STORAGE_HANDOVER_STORAGE_H_
-
-
-// ============================================================================
-// header: vmecpp/vmec/profile_parameterization_data/profile_parameterization_data.h
-// ============================================================================
-// SPDX-FileCopyrightText: 2024-present Proxima Fusion GmbH
-// <info@proximafusion.com>
-//
-// SPDX-License-Identifier: MIT
-#ifndef VMECPP_VMEC_PROFILE_PARAMETERIZATION_DATA_PROFILE_PARAMETERIZATION_DATA_H_
-#define VMECPP_VMEC_PROFILE_PARAMETERIZATION_DATA_PROFILE_PARAMETERIZATION_DATA_H_
-
-#include <cstdint>
-#include <cstdlib>
-#include <string>
-
-namespace vmecpp {
-
-// number of profile parameterizations
-#define NUM_PARAM 23
-
-enum class ProfileType : std::uint8_t { PRESSURE, CURRENT, IOTA };
-
-struct AllowedFor {
-  bool pres;
-  bool curr;
-  bool iota;
-};
-
-class ProfileParameterizationData {
- public:
-  ProfileParameterizationData(const std::string& name, bool allowedForPres,
-                              bool allowedForCurr, bool allowedForIota,
-                              bool needsSplineData);
-
-  const std::string& Name();
-  bool NeedsSplineData() const;
-  AllowedFor IsAllowedFor();
-
- private:
-  const std::string name_;
-  bool needsSplineData_;
-  AllowedFor allowedFor_;
-};
-
-enum class ProfileParameterization : std::uint8_t {
-  INVALID_PARAM = 0,
-  POWER_SERIES = 1,
-  POWER_SERIES_I = 2,
-  GAUSS_TRUNC = 3,
-  SUM_ATAN = 4,
-  TWO_LORENTZ = 5,
-  TWO_POWER = 6,
-  TWO_POWER_GS = 7,
-  AKIMA_SPLINE = 8,
-  AKIMA_SPLINE_I = 9,
-  AKIMA_SPLINE_IP = 10,
-  CUBIC_SPLINE = 11,
-  CUBIC_SPLINE_I = 12,
-  CUBIC_SPLINE_IP = 13,
-  PEDESTAL = 14,
-  RATIONAL = 15,
-  LINE_SEGMENT = 16,
-  LINE_SEGMENT_I = 17,
-  LINE_SEGMENT_IP = 18,
-  NICE_QUADRATIC = 19,
-  SUM_COSSQ_S = 20,
-  SUM_COSSQ_SQRTS = 21,
-  SUM_COSSQ_S_FREE = 22
-};
-
-}  // namespace vmecpp
-
-#endif  // VMECPP_VMEC_PROFILE_PARAMETERIZATION_DATA_PROFILE_PARAMETERIZATION_DATA_H_
 
 
 // ============================================================================
@@ -19452,7 +19571,7 @@ class RadialProfiles {
   // some parameterizations of the current profile need to be radially
   // integrated and some not, which is what `shouldIntegrate` is then used for.
   // Which profile parameterization is integrated and which not is documented in
-  // the body of `RadialProfiles::setupProfileParameterizations`, where `I`
+  // the body of `BuildProfileParameterizations`, where `I`
   // refers to the profile parameterization specifying the enclosed toroidal
   // current profile already (hence no integration is needed), and `I-prime`
   // indicating that the given profile parameterization needs to be integrated.
@@ -19582,10 +19701,7 @@ class RadialProfiles {
   const int signOfJacobian;
   const double pDamp;
 
-  std::vector<ProfileParameterizationData> ALL_PARAMS;
-
   /** one entry for every value of ProfileParameterization */
-  void setupProfileParameterizations();
 };
 
 }  // namespace vmecpp
@@ -23989,6 +24105,7 @@ absl::StatusOr<bool> IdealMhdModel::update(
 #pragma omp single
 #endif  // _OPENMP
       {
+        m_h_.vacuum_status = absl::OkStatus();
 #ifdef _OPENMP
 #pragma omp parallel num_threads(m_vac_num_threads_)
 #endif  // _OPENMP
@@ -24004,21 +24121,40 @@ absl::StatusOr<bool> IdealMhdModel::update(
               << "Nested vacuum parallel region was not granted the requested "
                  "number of threads";
 #endif  // _OPENMP
-          const bool rc = (*m_fb_vac_)[vac_thread_id]->update(
+          const absl::StatusOr<bool> rc = (*m_fb_vac_)[vac_thread_id]->update(
               m_h_.rCC_LCFS, m_h_.rSS_LCFS, m_h_.rSC_LCFS, m_h_.rCS_LCFS,
               m_h_.zSC_LCFS, m_h_.zCS_LCFS, m_h_.zCC_LCFS, m_h_.zSS_LCFS,
               signOfJacobian, m_h_.rAxis, m_h_.zAxis, &(m_h_.bSubUVac),
               &(m_h_.bSubVVac), netToroidalCurrent, ivacskip, checkpoint,
               at_checkpoint_iteration);
+          // Reduced across the team; the first error wins.
+          if (!rc.ok()) {
+#ifdef _OPENMP
+#pragma omp critical
+#endif  // _OPENMP
+            {
+              if (m_h_.vacuum_status.ok()) {
+                m_h_.vacuum_status = rc.status();
+              }
+            }
+          }
           // All nested threads follow identical control flow and compute the
           // same checkpoint result; record it once for the radial team.
           if (vac_thread_id == 0) {
-            m_h_.vacuum_reached_checkpoint = rc;
+            m_h_.vacuum_reached_checkpoint = rc.ok() && *rc;
           }
         }
       }
-      // The 'omp single' implicit barrier publishes the shared vacuum outputs
-      // and the broadcast flag to all radial threads.
+      // The 'omp single' barrier publishes the outputs, flag, and status.
+      // Only a warning here: the boundary may leave the grid transiently while
+      // the equilibrium is still moving. Vmec::run turns a still-outside
+      // boundary into an error once the run has converged.
+      if (!m_h_.vacuum_status.ok() && verbose) {
+#ifdef _OPENMP
+#pragma omp single
+#endif  // _OPENMP
+        std::cout << "WARNING: " << m_h_.vacuum_status.message() << "\n";
+      }
       if (m_h_.vacuum_reached_checkpoint) {
         return true;
       }
@@ -24086,8 +24222,8 @@ absl::StatusOr<bool> IdealMhdModel::update(
         }
 
         for (int kl = 0; kl < s_.nZnT; ++kl) {
-          // extrapolate total pressure (from inside) to LCFS
-          // TODO(jons): mark that this is bsqsav(lk,3)
+          // extrapolate total pressure (from inside) to LCFS; this is
+          // bsqsav(:,3) in Fortran VMEC
           insideTotalPressure[kl] =
               1.5 * totalPressure[(r_.nsMaxH - 1 - r_.nsMinH) * s_.nZnT + kl] -
               0.5 * totalPressure[(r_.nsMaxH - 2 - r_.nsMinH) * s_.nZnT + kl];
@@ -28961,8 +29097,12 @@ struct WOutFileContents {
 
   std::vector<std::string> curlabel;
 
-  // currently unused
+  // [2 * mnpd] sin(mu - nv) coefficients, then cos(mu - nv).
   Eigen::VectorXd potvac;
+
+  // [mnpd] mode numbers of potvac; not written by Fortran VMEC.
+  Eigen::VectorXi xmpot;
+  Eigen::VectorXi xnpot;
 
   // -------------------
   // mode numbers for Fourier coefficient arrays below
@@ -29288,10 +29428,6 @@ WOutFileContents ComputeWOutFileContents(
 // builds they do not reproduce to the same tolerance as the profiles across
 // machines. Pass current_density_tolerance > 0 to compare those two with a
 // looser bound while keeping every other quantity at tolerance.
-void CompareWOut(const WOutFileContents& test_wout,
-                 const WOutFileContents& expected_wout, double tolerance,
-                 bool check_equal_niter = true,
-                 double current_density_tolerance = 0.0);
 }  // namespace vmecpp
 
 #endif  // VMECPP_VMEC_OUTPUT_QUANTITIES_OUTPUT_QUANTITIES_H_
@@ -29339,6 +29475,11 @@ VectorXd NonEmptyVectorOr(const Eigen::VectorXd& vec, const double val) {
   } else {                                                            \
     ReadH5Dataset(m_obj.x, absl::StrFormat("%s/%s", H5key, old_name), \
                   from_file);                                         \
+  }
+// Read a field that files written before it existed do not carry.
+#define READMEMBER_OPTIONAL(x)                                     \
+  if (from_file.nameExists(absl::StrFormat("%s/%s", H5key, #x))) { \
+    READMEMBER(x);                                                 \
   }
 
 // Write object to the specified HDF5 file, under key "vmecinternalresults".
@@ -30094,7 +30235,9 @@ absl::Status vmecpp::WOutFileContents::WriteTo(H5::H5File& file) const {
   file.createGroup(this->H5key);
 
   WRITEMEMBER(version_);
-  // TODO(jurasic) input_extension
+  // input_extension is deliberately absent: it names the Fortran INDATA file a
+  // run came from, and VMEC++ runs from JSON. WOutFileContents sets it to the
+  // empty string for the same reason.
   WRITEMEMBER(signgs);
   WRITEMEMBER(gamma);
   WRITEMEMBER(pcurr_type);
@@ -30178,6 +30321,8 @@ absl::Status vmecpp::WOutFileContents::WriteTo(H5::H5File& file) const {
   WRITEMEMBER(equif);
   WRITEMEMBER(curlabel);
   WRITEMEMBER(potvac);
+  WRITEMEMBER(xmpot);
+  WRITEMEMBER(xnpot);
   WRITEMEMBER(xm);
   WRITEMEMBER(xn);
   WRITEMEMBER(xm_nyq);
@@ -30230,7 +30375,7 @@ absl::Status vmecpp::WOutFileContents::LoadInto(WOutFileContents& m_obj,
                   from_file);
     m_obj.version_ = std::stod(version_str);
   }
-  // TODO(jurasic) input_extension
+  // input_extension is not written; see WriteTo
   READMEMBER_COMPAT(signgs, "sign_of_jacobian");
   READMEMBER(gamma);
   READMEMBER(pcurr_type);
@@ -30346,6 +30491,8 @@ absl::Status vmecpp::WOutFileContents::LoadInto(WOutFileContents& m_obj,
   READMEMBER(equif);
   READMEMBER(curlabel);
   READMEMBER(potvac);
+  READMEMBER_OPTIONAL(xmpot);
+  READMEMBER_OPTIONAL(xnpot);
   READMEMBER(xm);
   READMEMBER(xn);
   READMEMBER(xm_nyq);
@@ -31919,7 +32066,8 @@ vmecpp::JxBOutFileContents vmecpp::ComputeJxBOutputFileContents(
           vmec_internal_results.bsubv(jHi * s.nZnT + kl);
 
       kperpu[kl] = 0.5 * (bsubv_outside + bsubv_inside) * pprime / sqgb2[kl];
-      kperpv[kl] = 0.5 * (bsubu_outside + bsubu_inside) * pprime / sqgb2[kl];
+      // J_perp = (B x grad p)/|B|^2, so the v component carries a minus sign.
+      kperpv[kl] = -0.5 * (bsubu_outside + bsubu_inside) * pprime / sqgb2[kl];
 
       // --------
 
@@ -32874,10 +33022,9 @@ vmecpp::ComputeIntermediateThreed1GeometricMagneticQuantities(
   //
   // b poloidals (cylindrical estimates)
 
-  // TODO(jons): rcenin (not used anywhere?)
-  // TODO(jons): aminr2in (not used anywhere?)
-  // TODO(jons): bminz2in (not used anywhere?)
-  // TODO(jons): bminz2 (not used anywhere?)
+  // Fortran eqfor.f90 also forms rcenin, aminr2in, bminz2in and bminz2 here.
+  // Their only consumers are the add_real calls in its debug dump, and
+  // bminz2in and bminz2 are the same expression, so nothing depends on them.
 
   // cylindrical estimates for beta poloidal
   double sump_sum = 0.0;
@@ -32939,10 +33086,8 @@ vmecpp::ComputeIntermediateThreed1GeometricMagneticQuantities(
   intermediate.delphid_exact *= intermediate.anorm;
   intermediate.rshaf = intermediate.rshaf1 / intermediate.rshaf2;
 
-  // TODO(jons): could also use threed1_first_table_intermediate.bvcof[0]
-  // directly...
-  intermediate.fpsi0 = 1.5 * threed1_first_table_intermediate.bvcoH[0] -
-                       0.5 * threed1_first_table_intermediate.bvcoH[1];
+  // bvcof[0] is this same extrapolation of bvcoH to the axis
+  intermediate.fpsi0 = threed1_first_table_intermediate.bvcof[0];
 
   intermediate.redge = VectorXd::Zero(s.nZnT);
   for (int kl = 0; kl < s.nZnT; ++kl) {
@@ -33279,14 +33424,13 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
     for (int jF = 1; jF < fc.ns; ++jF) {
       double minimum_z = DBL_MAX;
       double maximum_z = -DBL_MAX;
-      // TODO(jons): rename to ..._r
-      double minimum_x = DBL_MAX;
-      // TODO(jons): rename to ..._r
-      double maximum_x = -DBL_MAX;
+      double minimum_r = DBL_MAX;
+      double maximum_r = -DBL_MAX;
 
       double rzmax = 0.0;
 
-      // TODO(jons): these seem to not be used anywhere in Fortran VMEC?
+      // Fortran eqfor.f90 assigns rzmin, zxmax and zxmin alongside rzmax in
+      // the loop below and then reads none of them, so they are left out here.
       // double rzmin = 0.0;
       // double zxmax = 0.0;
       // double zxmin = 0.0;
@@ -33322,13 +33466,13 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
             // rzmin = yr1u;
           }
 
-          if (yr1u >= maximum_x) {
-            maximum_x = yr1u;
+          if (yr1u >= maximum_r) {
+            maximum_r = yr1u;
 
             // TODO(jons): these seem to not be used anywhere  in Fortran VMEC?
             // zxmax = yz1u;
-          } else if (yr1u <= minimum_x) {
-            minimum_x = yr1u;
+          } else if (yr1u <= minimum_r) {
+            minimum_r = yr1u;
 
             // TODO(jons): these seem to not be used anywhere in Fortran VMEC?
             // zxmin = yz1u;
@@ -33354,17 +33498,17 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
       result.ygeo[nplanes * fc.ns + jF] = (xmidb - xmida) / 2.0;
 
       result.yinden[nplanes * fc.ns + jF] =
-          (xmida - minimum_x) / (maximum_x - minimum_x);
+          (xmida - minimum_r) / (maximum_r - minimum_r);
 
       result.yellip[nplanes * fc.ns + jF] =
-          (maximum_z - minimum_z) / (maximum_x - minimum_x);
+          (maximum_z - minimum_z) / (maximum_r - minimum_r);
 
       result.ytrian[nplanes * fc.ns + jF] =
-          (rgeo - rzmax) / (maximum_x - minimum_x);
+          (rgeo - rzmax) / (maximum_r - minimum_r);
 
       const double r_axis = vmec_internal_results.r_e(k * s.nThetaEff + 0);
       result.yshift[nplanes * fc.ns + jF] =
-          (r_axis - rgeo) / (maximum_x - minimum_x);
+          (r_axis - rgeo) / (maximum_r - minimum_r);
     }  // jF
   }  // nplanes
 
@@ -33820,7 +33964,29 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
 
   wout.equif = threed1_first_table.radial_force;
 
-  // TODO(jons): curlabel, potvac: once free-boundary works
+  // potvac is stored at the lasym size 2 * mnpd; the cos(mu-nv) half stays zero
+  // for a stellarator-symmetric run, matching the Fortran wout layout. A
+  // fixed-boundary run leaves it empty, as Fortran VMEC does.
+  const Eigen::VectorXd& vacuum_potential = handover_storage.vacuum_potential;
+  if (vacuum_potential.size() > 0) {
+    const int nf = s.ntor;
+    const int mf = s.mpol + 1;
+    const int mnpd = (2 * nf + 1) * (mf + 1);
+    wout.potvac = VectorXd::Zero(2 * mnpd);
+    if (vacuum_potential.size() <= wout.potvac.size()) {
+      wout.potvac.head(vacuum_potential.size()) = vacuum_potential;
+    }
+
+    // Nestor walks mn with m fastest; xnpot carries the nfp factor, like xn.
+    wout.xmpot = Eigen::VectorXi::Zero(mnpd);
+    wout.xnpot = Eigen::VectorXi::Zero(mnpd);
+    for (int mn = 0; mn < mnpd; ++mn) {
+      wout.xmpot[mn] = mn % (mf + 1);
+      wout.xnpot[mn] = (mn / (mf + 1) - nf) * s.nfp;
+    }
+  }
+
+  // TODO(jons): curlabel: the mgrid coil-group names are not read back yet
 
   // -------------------
   // mode numbers for Fourier coefficient arrays below
@@ -34741,310 +34907,6 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   return wout;
 }  // NOLINT(readability/fn_size)
 
-void vmecpp::CompareWOut(const WOutFileContents& test_wout,
-                         const WOutFileContents& expected_wout,
-                         double tolerance, bool check_equal_niter,
-                         double current_density_tolerance) {
-  // jcuru, jcurv compare looser only if the caller opts in; otherwise
-  // tolerance.
-  const double current_tolerance =
-      current_density_tolerance > 0.0 ? current_density_tolerance : tolerance;
-  CHECK_EQ(test_wout.signgs, expected_wout.signgs);
-  CHECK_EQ(test_wout.gamma, expected_wout.gamma);
-  CHECK_EQ(test_wout.pcurr_type, expected_wout.pcurr_type);
-  CHECK_EQ(test_wout.pmass_type, expected_wout.pmass_type);
-  CHECK_EQ(test_wout.piota_type, expected_wout.piota_type);
-
-  CHECK(IsVectorCloseRelAbs(expected_wout.am, test_wout.am, tolerance));
-  CHECK(IsVectorCloseRelAbs(expected_wout.ac, test_wout.ac, tolerance));
-  CHECK(IsVectorCloseRelAbs(expected_wout.ai, test_wout.ai, tolerance));
-
-  CHECK_EQ(test_wout.nfp, expected_wout.nfp);
-  CHECK_EQ(test_wout.mpol, expected_wout.mpol);
-  CHECK_EQ(test_wout.ntor, expected_wout.ntor);
-  CHECK_EQ(test_wout.lasym, expected_wout.lasym);
-
-  CHECK_EQ(test_wout.ns, expected_wout.ns);
-  CHECK_EQ(test_wout.ftolv, expected_wout.ftolv);
-  if (check_equal_niter) {
-    CHECK_EQ(test_wout.niter, expected_wout.niter);
-  }
-
-  CHECK_EQ(test_wout.lfreeb, expected_wout.lfreeb);
-  CHECK_EQ(test_wout.mgrid_mode, expected_wout.mgrid_mode);
-
-  // -------------------
-  // scalar quantities
-
-  CHECK(IsCloseRelAbs(expected_wout.wb, test_wout.wb, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.wp, test_wout.wp, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.rmax_surf, test_wout.rmax_surf, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.rmin_surf, test_wout.rmin_surf, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.zmax_surf, test_wout.zmax_surf, tolerance));
-
-  CHECK_EQ(test_wout.mnmax, expected_wout.mnmax);
-  CHECK_EQ(test_wout.mnmax_nyq, expected_wout.mnmax_nyq);
-
-  CHECK_EQ(test_wout.ier_flag, expected_wout.ier_flag);
-
-  CHECK(IsCloseRelAbs(expected_wout.aspect, test_wout.aspect, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.betatotal, test_wout.betatotal, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.betapol, test_wout.betapol, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.betator, test_wout.betator, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.betaxis, test_wout.betaxis, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.b0, test_wout.b0, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.rbtor0, test_wout.rbtor0, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.rbtor, test_wout.rbtor, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.IonLarmor, test_wout.IonLarmor, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.volavgB, test_wout.volavgB, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.ctor, test_wout.ctor, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.Aminor_p, test_wout.Aminor_p, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.Rmajor_p, test_wout.Rmajor_p, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.volume, test_wout.volume, tolerance));
-
-  CHECK(IsCloseRelAbs(expected_wout.fsqr, test_wout.fsqr, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.fsqz, test_wout.fsqz, tolerance));
-  CHECK(IsCloseRelAbs(expected_wout.fsql, test_wout.fsql, tolerance));
-
-  // -------------------
-  // one-dimensional array quantities
-
-  const int ns = static_cast<int>(expected_wout.iotaf.size());
-  for (int jF = 0; jF < ns; ++jF) {
-    CHECK(
-        IsCloseRelAbs(expected_wout.iotaf[jF], test_wout.iotaf[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.q_factor[jF], test_wout.q_factor[jF],
-                        tolerance));
-    CHECK(
-        IsCloseRelAbs(expected_wout.presf[jF], test_wout.presf[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.phi[jF], test_wout.phi[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.chi[jF], test_wout.chi[jF], tolerance));
-    CHECK(
-        IsCloseRelAbs(expected_wout.phipf[jF], test_wout.phipf[jF], tolerance));
-    CHECK(
-        IsCloseRelAbs(expected_wout.chipf[jF], test_wout.chipf[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.jcuru[jF], test_wout.jcuru[jF],
-                        current_tolerance))
-        << "jF = " << jF;
-    CHECK(IsCloseRelAbs(expected_wout.jcurv[jF], test_wout.jcurv[jF],
-                        current_tolerance))
-        << "jF = " << jF;
-    CHECK(
-        IsCloseRelAbs(expected_wout.specw[jF], test_wout.specw[jF], tolerance));
-  }  // jF
-
-  for (int jF = 0; jF < ns; ++jF) {
-    CHECK(
-        IsCloseRelAbs(expected_wout.iotas[jF], test_wout.iotas[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.mass[jF], test_wout.mass[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.pres[jF], test_wout.pres[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.beta_vol[jF], test_wout.beta_vol[jF],
-                        tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.buco[jF], test_wout.buco[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.bvco[jF], test_wout.bvco[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.vp[jF], test_wout.vp[jF], tolerance));
-    CHECK(
-        IsCloseRelAbs(expected_wout.phips[jF], test_wout.phips[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.over_r[jF], test_wout.over_r[jF],
-                        tolerance));
-  }  // jF
-
-  for (int jF = 0; jF < ns; ++jF) {
-    CHECK(
-        IsCloseRelAbs(expected_wout.jdotb[jF], test_wout.jdotb[jF], tolerance));
-    CHECK(
-        IsCloseRelAbs(expected_wout.bdotb[jF], test_wout.bdotb[jF], tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.bdotgradv[jF], test_wout.bdotgradv[jF],
-                        tolerance));
-  }  // jF
-
-  for (int jF = 0; jF < ns; ++jF) {
-    CHECK(
-        IsCloseRelAbs(expected_wout.DMerc[jF], test_wout.DMerc[jF], tolerance))
-        << "jF = " << jF;
-    CHECK(IsCloseRelAbs(expected_wout.DShear[jF], test_wout.DShear[jF],
-                        tolerance))
-        << "jF = " << jF;
-    CHECK(
-        IsCloseRelAbs(expected_wout.DWell[jF], test_wout.DWell[jF], tolerance))
-        << "jF = " << jF;
-    CHECK(
-        IsCloseRelAbs(expected_wout.DCurr[jF], test_wout.DCurr[jF], tolerance))
-        << "jF = " << jF;
-    CHECK(
-        IsCloseRelAbs(expected_wout.DGeod[jF], test_wout.DGeod[jF], tolerance))
-        << "jF = " << jF;
-  }  // jF
-
-  for (int jF = 0; jF < ns; ++jF) {
-    CHECK(
-        IsCloseRelAbs(expected_wout.equif[jF], test_wout.equif[jF], tolerance))
-        << "jF = " << jF;
-  }
-
-  // -------------------
-  // mode numbers for Fourier coefficient arrays below
-
-  for (int mn = 0; mn < test_wout.mnmax; ++mn) {
-    CHECK_EQ(test_wout.xm[mn], expected_wout.xm[mn]);
-    CHECK_EQ(test_wout.xn[mn], expected_wout.xn[mn]);
-  }  // mn
-
-  for (int mn_nyq = 0; mn_nyq < test_wout.mnmax_nyq; ++mn_nyq) {
-    CHECK_EQ(test_wout.xm_nyq[mn_nyq], expected_wout.xm_nyq[mn_nyq]);
-    CHECK_EQ(test_wout.xn_nyq[mn_nyq], expected_wout.xn_nyq[mn_nyq]);
-  }  // mn_nyq
-
-  // -------------------
-  // stellarator-symmetric Fourier coefficients
-
-  for (int n = 0; n <= test_wout.ntor; ++n) {
-    CHECK(IsCloseRelAbs(expected_wout.raxis_cc[n], test_wout.raxis_cc[n],
-                        tolerance));
-    CHECK(IsCloseRelAbs(expected_wout.zaxis_cs[n], test_wout.zaxis_cs[n],
-                        tolerance));
-  }  // n
-
-  for (int jF = 0; jF < ns; ++jF) {
-    for (int mn = 0; mn < test_wout.mnmax; ++mn) {
-      CHECK(IsCloseRelAbs(expected_wout.rmnc(mn, jF), test_wout.rmnc(mn, jF),
-                          tolerance))
-          << "jF = " << jF << " mn = " << mn;
-      CHECK(IsCloseRelAbs(expected_wout.zmns(mn, jF), test_wout.zmns(mn, jF),
-                          tolerance))
-          << "jF = " << jF << " mn = " << mn;
-    }  // mn
-  }  // jF
-
-  for (int jF = 0; jF < ns; ++jF) {
-    for (int mn = 0; mn < test_wout.mnmax; ++mn) {
-      CHECK(IsCloseRelAbs(expected_wout.lmns(mn, jF), test_wout.lmns(mn, jF),
-                          tolerance))
-          << "jF = " << jF << " mn = " << mn;
-    }  // mn
-  }  // jF
-
-  for (int jF = 0; jF < ns; ++jF) {
-    for (int mn_nyq = 0; mn_nyq < test_wout.mnmax_nyq; ++mn_nyq) {
-      CHECK(IsCloseRelAbs(expected_wout.gmnc(mn_nyq, jF),
-                          test_wout.gmnc(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      CHECK(IsCloseRelAbs(expected_wout.bmnc(mn_nyq, jF),
-                          test_wout.bmnc(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      CHECK(IsCloseRelAbs(expected_wout.bsubumnc(mn_nyq, jF),
-                          test_wout.bsubumnc(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      CHECK(IsCloseRelAbs(expected_wout.bsubvmnc(mn_nyq, jF),
-                          test_wout.bsubvmnc(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      CHECK(IsCloseRelAbs(expected_wout.bsubsmns(mn_nyq, jF),
-                          test_wout.bsubsmns(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      CHECK(IsCloseRelAbs(expected_wout.bsupumnc(mn_nyq, jF),
-                          test_wout.bsupumnc(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      CHECK(IsCloseRelAbs(expected_wout.bsupvmnc(mn_nyq, jF),
-                          test_wout.bsupvmnc(mn_nyq, jF), tolerance))
-          << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      // Current density coefficients are computed via finite differences
-      // of covariant B Fourier coefficients, which amplifies differences.
-      // Skip when base tolerance is very loose (e.g. hot restart comparisons
-      // where bsub fields already differ by ~10%), as finite differencing
-      // amplifies those to >100% for current density, making comparison
-      // meaningless. Also skip axis/edge extrapolation points and cases
-      // where the arrays are empty (e.g. loaded from old HDF5 files).
-      if (expected_wout.currumnc.size() > 0 && test_wout.currumnc.size() > 0 &&
-          jF > 0 && jF < ns - 1 && tolerance < 1.0e-2) {
-        const double curr_tol = std::max(tolerance * 10.0, 1.0e-4);
-        CHECK(IsCloseRelAbs(expected_wout.currumnc(mn_nyq, jF),
-                            test_wout.currumnc(mn_nyq, jF), curr_tol))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.currvmnc(mn_nyq, jF),
-                            test_wout.currvmnc(mn_nyq, jF), curr_tol))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-      }
-    }  // mn_nyq
-  }  // jF
-
-  // -------------------
-  // non-stellarator-symmetric Fourier coefficients
-
-  if (test_wout.lasym) {
-    for (int n = 0; n <= test_wout.ntor; ++n) {
-      CHECK(IsCloseRelAbs(expected_wout.raxis_cs[n], test_wout.raxis_cs[n],
-                          tolerance));
-      CHECK(IsCloseRelAbs(expected_wout.zaxis_cc[n], test_wout.zaxis_cc[n],
-                          tolerance));
-    }  // n
-
-    for (int jF = 0; jF < ns; ++jF) {
-      for (int mn = 0; mn < test_wout.mnmax; ++mn) {
-        CHECK(IsCloseRelAbs(expected_wout.rmns(mn, jF), test_wout.rmns(mn, jF),
-                            tolerance))
-            << "jF = " << jF << " mn = " << mn;
-        CHECK(IsCloseRelAbs(expected_wout.zmnc(mn, jF), test_wout.zmnc(mn, jF),
-                            tolerance))
-            << "jF = " << jF << " mn = " << mn;
-      }  // mn
-    }  // jF
-
-    for (int jF = 0; jF < ns; ++jF) {
-      for (int mn = 0; mn < test_wout.mnmax; ++mn) {
-        CHECK(IsCloseRelAbs(expected_wout.lmnc(mn, jF), test_wout.lmnc(mn, jF),
-                            tolerance))
-            << "jF = " << jF << " mn = " << mn;
-      }  // mn
-    }  // jF
-
-    for (int jF = 0; jF < ns; ++jF) {
-      for (int mn_nyq = 0; mn_nyq < test_wout.mnmax_nyq; ++mn_nyq) {
-        CHECK(IsCloseRelAbs(expected_wout.gmns(mn_nyq, jF),
-                            test_wout.gmns(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.bmns(mn_nyq, jF),
-                            test_wout.bmns(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.bsubumns(mn_nyq, jF),
-                            test_wout.bsubumns(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.bsubvmns(mn_nyq, jF),
-                            test_wout.bsubvmns(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.bsubsmnc(mn_nyq, jF),
-                            test_wout.bsubsmnc(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.bsupumns(mn_nyq, jF),
-                            test_wout.bsupumns(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        CHECK(IsCloseRelAbs(expected_wout.bsupvmns(mn_nyq, jF),
-                            test_wout.bsupvmns(mn_nyq, jF), tolerance))
-            << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        // See comment above on currumnc/currvmnc for why these are skipped
-        // when the base tolerance is loose or the arrays are empty.
-        if (expected_wout.currumns.size() > 0 &&
-            test_wout.currumns.size() > 0 && jF > 0 && jF < ns - 1 &&
-            tolerance < 1.0e-2) {
-          const double curr_tol = std::max(tolerance * 10.0, 1.0e-4);
-          CHECK(IsCloseRelAbs(expected_wout.currumns(mn_nyq, jF),
-                              test_wout.currumns(mn_nyq, jF), curr_tol))
-              << "jF = " << jF << " mn_nyq = " << mn_nyq;
-          CHECK(IsCloseRelAbs(expected_wout.currvmns(mn_nyq, jF),
-                              test_wout.currvmns(mn_nyq, jF), curr_tol))
-              << "jF = " << jF << " mn_nyq = " << mn_nyq;
-        }
-      }  // mn_nyq
-    }  // jF
-  }
-}
-
 
 // ============================================================================
 // source: vmecpp/vmec/profile_parameterization_data/profile_parameterization_data.cc
@@ -35055,8 +34917,111 @@ void vmecpp::CompareWOut(const WOutFileContents& test_wout,
 // SPDX-License-Identifier: MIT
 
 #include <string>
+#include <vector>
 
 namespace vmecpp {
+namespace {
+
+std::vector<ProfileParameterizationData> BuildProfileParameterizations() {
+  // Entries are in ProfileParameterization order; findParameterization relies
+  // on the index matching the enumerator.
+  //
+  //                       current | iota | pressure
+  //                       --------+------+---------
+  // POWER_SERIES          I-prime |   X  |     X
+  // POWER_SERIES_I        I       |      |
+  // GAUSS_TRUNC           I-prime |      |     X
+  // SUM_ATAN              I       |   X  |
+  // TWO_LORENTZ                   |      |     X
+  // TWO_POWER             I-prime |      |     X
+  // TWO_POWER_GS          I-prime |      |     X
+  // AKIMA_SPLINE                  |   X  |     X
+  // AKIMA_SPLINE_I        I       |      |
+  // AKIMA_SPLINE_IP       I-prime |      |
+  // CUBIC_SPLINE                  |   X  |     X
+  // CUBIC_SPLINE_I        I       |      |
+  // CUBIC_SPLINE_IP       I-prime |      |
+  // PEDESTAL              I       |      |     X
+  // RATIONAL              I       |   X  |     X
+  // LINE_SEGMENT                  |   X  |     X
+  // LINE_SEGMENT_I        I       |      |
+  // LINE_SEGMENT_IP       I-prime |      |
+  // NICE_QUADRATIC                |   X  |
+  std::vector<ProfileParameterizationData> all;
+  all.reserve(NUM_PARAM);
+  all.emplace_back("---invalid---", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ false, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("power_series", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ true,
+                   /*needsSplineData*/ false);
+  all.emplace_back("power_series_i", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("gauss_trunc", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("sum_atan", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ true,
+                   /*needsSplineData*/ false);
+  all.emplace_back("two_lorentz", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ false, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("two_power", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("two_power_gs", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("akima_spline", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ false, /*allowedForIota*/ true,
+                   /*needsSplineData*/ true);
+  all.emplace_back("akima_spline_i", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ true);
+  all.emplace_back("akima_spline_ip", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ true);
+  all.emplace_back("cubic_spline", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ false, /*allowedForIota*/ true,
+                   /*needsSplineData*/ true);
+  all.emplace_back("cubic_spline_i", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ true);
+  all.emplace_back("cubic_spline_ip", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ true);
+  all.emplace_back("pedestal", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("rational", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ true,
+                   /*needsSplineData*/ false);
+  all.emplace_back("line_segment", /*allowedForPres=*/true,
+                   /*allowedForCurr*/ false, /*allowedForIota*/ true,
+                   /*needsSplineData*/ true);
+  all.emplace_back("line_segment_i", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ true);
+  all.emplace_back("line_segment_ip", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ true);
+  all.emplace_back("nice_quadratic", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ false, /*allowedForIota*/ true,
+                   /*needsSplineData*/ false);
+  all.emplace_back("sum_cossq_s", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("sum_cossq_sqrts", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  all.emplace_back("sum_cossq_s_free", /*allowedForPres=*/false,
+                   /*allowedForCurr*/ true, /*allowedForIota*/ false,
+                   /*needsSplineData*/ false);
+  return all;
+}
+
+}  // namespace
 
 ProfileParameterizationData::ProfileParameterizationData(
     const std::string& name, bool allowedForPres, bool allowedForCurr,
@@ -35067,13 +35032,52 @@ ProfileParameterizationData::ProfileParameterizationData(
                    .curr = allowedForCurr,
                    .iota = allowedForIota}) {}
 
-const std::string& ProfileParameterizationData::Name() { return name_; }
+const std::string& ProfileParameterizationData::Name() const { return name_; }
 
 bool ProfileParameterizationData::NeedsSplineData() const {
   return needsSplineData_;
 }
 
-AllowedFor ProfileParameterizationData::IsAllowedFor() { return allowedFor_; }
+AllowedFor ProfileParameterizationData::IsAllowedFor() const {
+  return allowedFor_;
+}
+
+const std::vector<ProfileParameterizationData>& AllProfileParameterizations() {
+  static const std::vector<ProfileParameterizationData>* const kAll =
+      new std::vector<ProfileParameterizationData>(
+          BuildProfileParameterizations());
+  return *kAll;
+}
+
+const ProfileParameterizationData* FindProfileParameterization(
+    const std::string& name) {
+  for (const ProfileParameterizationData& entry :
+       AllProfileParameterizations()) {
+    if (entry.Name() == name) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+bool IsProfileParameterizationAllowedFor(const std::string& name,
+                                         ProfileType type) {
+  const ProfileParameterizationData* const entry =
+      FindProfileParameterization(name);
+  if (entry == nullptr) {
+    return false;
+  }
+  const AllowedFor allowed = entry->IsAllowedFor();
+  switch (type) {
+    case ProfileType::PRESSURE:
+      return allowed.pres;
+    case ProfileType::CURRENT:
+      return allowed.curr;
+    case ProfileType::IOTA:
+      return allowed.iota;
+  }
+  return false;
+}
 
 }  // namespace vmecpp
 
@@ -35450,8 +35454,6 @@ RadialProfiles::RadialProfiles(const RadialPartitioning* r,
   piotaType = ProfileParameterization::INVALID_PARAM;
   pcurrType = ProfileParameterization::INVALID_PARAM;
 
-  setupProfileParameterizations();
-
   // half-grid
   phipH.resize(r_.nsMaxH - r_.nsMinH);
   chipH.resize(r_.nsMaxH - r_.nsMinH);
@@ -35503,121 +35505,20 @@ void RadialProfiles::setupInputProfiles() {
   computeMagneticFluxes();
 }
 
-void RadialProfiles::setupProfileParameterizations() {
-  // clang-format off
-  //                       current | iota | pressure
-  //                       --------+------+---------
-  // INVALID_PARAM                 |      |
-  // POWER_SERIES          I-prime |   X  |     X
-  // POWER_SERIES_I        I       |      |
-  // GAUSS_TRUNC           I-prime |      |     X
-  // SUM_ATAN              I       |   X  |
-  // TWO_LORENTZ                   |      |     X
-  // TWO_POWER             I-prime |      |     X
-  // TWO_POWER_GS          I-prime |      |     X
-  // AKIMA_SPLINE                  |   X  |     X
-  // AKIMA_SPLINE_I        I       |      |
-  // AKIMA_SPLINE_IP       I-prime |      |
-  // CUBIC_SPLINE                  |   X  |     X
-  // CUBIC_SPLINE_I        I       |      |
-  // CUBIC_SPLINE_IP       I-prime |      |
-  // PEDESTAL              I       |      |     X
-  // RATIONAL              I       |   X  |     X
-  // LINE_SEGMENT                  |   X  |     X
-  // LINE_SEGMENT_I        I       |      |
-  // LINE_SEGMENT_IP       I-prime |      |
-  // NICE_QUADRATIC                |   X  |
-  // SUM_COSSQ_S           I-prime |      |
-  // SUM_COSSQ_SQRTS       I-prime |      |
-  // SUM_COSSQ_S_FREE      I-prime |      |
-  // clang-format on
-
-  ALL_PARAMS.reserve(NUM_PARAM);
-  ALL_PARAMS.emplace_back("---invalid---", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ false, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("power_series", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ true,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("power_series_i", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("gauss_trunc", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("sum_atan", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ true,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("two_lorentz", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ false, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("two_power", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("two_power_gs", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("akima_spline", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("akima_spline_i", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("akima_spline_ip", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("cubic_spline", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("cubic_spline_i", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("cubic_spline_ip", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("pedestal", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("rational", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ true,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("line_segment", /*allowedForPres=*/true,
-                          /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("line_segment_i", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("line_segment_ip", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ true);
-  ALL_PARAMS.emplace_back("nice_quadratic", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("sum_cossq_s", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("sum_cossq_sqrts", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-  ALL_PARAMS.emplace_back("sum_cossq_s_free", /*allowedForPres=*/false,
-                          /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                          /*needsSplineData*/ false);
-}
-
 ProfileParameterization RadialProfiles::findParameterization(
     const std::string& name, ProfileType intendedType) {
   for (int i = 0; i < NUM_PARAM; ++i) {
-    if (name == ALL_PARAMS[i].Name()) {
+    if (name == AllProfileParameterizations()[i].Name()) {
       bool isApplicable = false;
       switch (intendedType) {
         case ProfileType::PRESSURE:
-          isApplicable = ALL_PARAMS[i].IsAllowedFor().pres;
+          isApplicable = AllProfileParameterizations()[i].IsAllowedFor().pres;
           break;
         case ProfileType::CURRENT:
-          isApplicable = ALL_PARAMS[i].IsAllowedFor().curr;
+          isApplicable = AllProfileParameterizations()[i].IsAllowedFor().curr;
           break;
         case ProfileType::IOTA:
-          isApplicable = ALL_PARAMS[i].IsAllowedFor().iota;
+          isApplicable = AllProfileParameterizations()[i].IsAllowedFor().iota;
           break;
         default:
           std::cerr << absl::StrFormat("unknown profile: %s",
@@ -35629,7 +35530,7 @@ ProfileParameterization RadialProfiles::findParameterization(
       if (!isApplicable) {
         std::cerr << absl::StrFormat(
                          "profile name '%s' is not applicable for %s profile",
-                         ALL_PARAMS[i].Name(),
+                         AllProfileParameterizations()[i].Name(),
                          profileTypeToString(intendedType))
                   << '\n';
         return ProfileParameterization::INVALID_PARAM;
@@ -35821,10 +35722,11 @@ double RadialProfiles::evalProfileFunction(const ProfileParameterization& param,
     case ProfileParameterization::SUM_COSSQ_SQRTS:
     case ProfileParameterization::SUM_COSSQ_S_FREE:
     default:
-      std::cerr << absl::StrFormat(
-                       "profile parameterization '%s' not implemented yet",
-                       ALL_PARAMS[static_cast<int>(param)].Name())
-                << '\n';
+      std::cerr
+          << absl::StrFormat(
+                 "profile parameterization '%s' not implemented yet",
+                 AllProfileParameterizations()[static_cast<int>(param)].Name())
+          << '\n';
   }
 
   return 0.0;
@@ -36886,19 +36788,19 @@ void UpdateStatusForThread(absl::Status& m_status_of_all_threads, int thread_id,
                            const absl::Status& thread_status) {
   CHECK(!thread_status.ok()) << "UpdateStatusForThread expects an error status";
 
-  auto thread_msg =
-      absl::StrFormat("Thread %i:\n\t%s", thread_id, thread_status.message());
+  const auto thread_msg =
+      absl::StrFormat("Thread %i:\n\t%s\n", thread_id, thread_status.message());
 
+  // Collapses to kInternal; recoverability is tracked separately.
   if (m_status_of_all_threads.ok()) {
-    auto msg =
-        "There was an error in one or more threads during a VMEC++ run:\n" +
-        thread_msg;
-    m_status_of_all_threads = absl::InternalError(std::move(thread_msg));
+    m_status_of_all_threads = absl::InternalError(absl::StrCat(
+        "There was an error in one or more threads during a VMEC++ run:\n",
+        thread_msg));
+    return;
   }
 
-  const auto new_msg =
-      std::string(m_status_of_all_threads.message()) + thread_msg;
-  m_status_of_all_threads = absl::InternalError(new_msg);
+  m_status_of_all_threads = absl::InternalError(
+      absl::StrCat(m_status_of_all_threads.message(), thread_msg));
 }
 
 // Check preconditions on (initial_state, indata) pair passed to Vmec::run
@@ -37266,6 +37168,21 @@ absl::StatusOr<bool> Vmec::run(const VmecCheckpoint& checkpoint,
         VmecStatusAsString(status_), iter2_ - 1, fc_.niterv, fc_.nsval,
         fc_.ftolv, fc_.fsqr, fc_.fsqz, fc_.fsql);
     return absl::InternalError(msg);
+  }
+
+  // A converged free-boundary result must not rest on a vacuum field that was
+  // clamped to the grid edge. h_.vacuum_status holds the last vacuum solve, so
+  // a boundary that only left the grid transiently has already cleared it.
+  if (!h_.vacuum_status.ok()) {
+    if (!indata_.return_outputs_even_if_not_converged) {
+      return h_.vacuum_status;
+    }
+    status_ = VmecStatus::UNRECOVERABLE_ERROR;
+  }
+
+  // Hand Nestor's converged scalar potential over for the wout `potvac` field.
+  if (fc_.lfreeb) {
+    h_.vacuum_potential = bvecShare;
   }
 
   // compute output file quantities, but do not write them to output file yet

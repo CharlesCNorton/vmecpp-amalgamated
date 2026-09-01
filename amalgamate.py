@@ -4,8 +4,8 @@ Merges the VMEC++ library translation units plus the standalone CLI main() into
 one .cc. Project headers (vmecpp/, util/) are inlined once each in dependency
 order via a recursive paste-once walk; external includes (Eigen, abseil, HDF5,
 NetCDF, nlohmann/json, OpenMP) are left in place, their own include guards
-making repetition free. abscab (Apache-2.0) is not header-only -- abscab.hh
-holds declarations and abscab.cc the definitions -- so both are inlined.
+making repetition free. abscab (Apache-2.0) is not header-only, since abscab.hh
+holds the declarations and abscab.cc the definitions, so both are inlined.
 
 The FFTX-accelerated transform path (VMECPP_USE_FFTX) is dropped, leaving the
 partial-DFT routines VMEC++ falls back to when FFTX is off.
@@ -30,8 +30,8 @@ from pathlib import Path
 
 INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*([<"])([^>"]+)[>"]')
 
-# Library TUs relative to the cpp root, mirroring the vmecpp_sources list the
-# upstream CMakeLists assemble; vmec_standalone (the sole main()) last.
+# Library TUs relative to the cpp root, mirroring the vmecpp_sources list in
+# upstream's CMakeLists; vmec_standalone (the sole main()) last.
 # fft_toroidal.cc is listed for parity with upstream and strips to nothing here,
 # its whole body sitting behind VMECPP_USE_FFTX. The two Enzyme translation
 # units (exact_force_{jvp,vjp}.cc) are excluded: upstream builds them only under
@@ -96,10 +96,10 @@ def build_inline_roots(cpp, abscab_root):
 def resolve_inline(quote, name, cur_dir, inline_roots):
     """On-disk path if `name` is an include we should inline, else None.
 
-    Match the INLINE_ROOTS prefixes first (covers both <...> and "..." since
+    Match the inline_roots prefixes first (covers both <...> and "..." since
     the project uses both). For quoted includes, also try the including file's
     own directory (standard C++ semantics) and accept it only when it lands
-    under an inline root -- that is how abscab.cc's `#include "abscab.hh"` is
+    under an inline root, which is how abscab.cc's `#include "abscab.hh"` is
     found.
     """
     for prefix, root in inline_roots:

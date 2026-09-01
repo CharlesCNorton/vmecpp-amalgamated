@@ -1,9 +1,9 @@
 # VMEC++ single-file amalgamation
 
 The [VMEC++](https://github.com/proximafusion/vmecpp) 3D MHD equilibrium solver
-merged into one C++ translation unit, `vmecpp_amalgamated.cc`. It is VMEC++'s own
-source merged into a single file, not a reimplementation, so it builds the same
-solver and writes the same output.
+merged into one C++ translation unit, `vmecpp_amalgamated.cc`. The sources are
+VMEC++'s own rather than a reimplementation, so the binary solves the same
+equilibria and writes the same output.
 
 This is an unofficial redistribution and is not affiliated with or endorsed by
 Proxima Fusion.
@@ -18,11 +18,10 @@ uses) is inlined as well.
 
 Two optional paths that upstream keeps behind build defines are left out. The
 FFTX/SPIRAL toroidal transform (`VMECPP_USE_FFTX`) is dropped, leaving the
-partial-DFT routines VMEC++ falls back to when FFTX is off; upstream's
-`fft_toroidal_test` is what checks the two against each other. The Enzyme
-autodiff translation units (`VMECPP_ENABLE_ENZYME`) are dropped too, since they
-compile only under a Clang/Enzyme plugin, and their call sites in
-`ideal_mhd_model.cc` sit behind that same define.
+partial-DFT routines VMEC++ falls back to when FFTX is off. The Enzyme autodiff
+translation units (`VMECPP_ENABLE_ENZYME`) are dropped too, since they compile
+only under a Clang/Enzyme plugin, and their call sites in `ideal_mhd_model.cc`
+sit behind that same define.
 
 Tests, benchmarks, mockups, the `makegrid` CLI, and the Python (pybind) module
 are not included.
@@ -62,10 +61,10 @@ upstream's `indata2json` tool.
 ## How it is generated
 
 `amalgamate.py` produces `vmecpp_amalgamated.cc` from a VMEC++ checkout and an
-abscab checkout. Its translation-unit list mirrors the `vmecpp_sources` list
-upstream's CMakeLists assemble. It inlines each project header once in
-dependency order, leaves external includes in place, inlines
-`abscab.hh`/`abscab.cc`, and drops the `VMECPP_USE_FFTX` branches.
+abscab checkout. Its translation-unit list mirrors the `vmecpp_sources` list in
+upstream's CMakeLists. It inlines each project header once in dependency order,
+leaves external includes in place, inlines `abscab.hh`/`abscab.cc`, and drops
+the `VMECPP_USE_FFTX` branches.
 
 ```sh
 git clone https://github.com/proximafusion/vmecpp
@@ -82,23 +81,26 @@ python amalgamate.py \
 
 Checked against a conventional multi-file build of the same sources: upstream's
 own CMake build at the same commit, configured with `-DVMECPP_USE_FFTX=OFF` so
-both binaries take the partial-DFT path, both compiled by GCC 13.3 against the
-pinned dependency versions. Every case in upstream's `test_data` was run
-single-threaded by both binaries and the resulting HDF5 files compared dataset
-by dataset with `tools/compare_outputs.py`.
+both binaries take the partial-DFT path, both compiled by GCC 13.3 on Ubuntu
+24.04 against the pinned dependency versions. Every case in upstream's
+`test_data` was run single-threaded by both binaries and the resulting HDF5
+files compared dataset by dataset with `tools/compare_outputs.py`.
 
-All 16 cases came out bit-for-bit identical, 436 datasets each and 440 for the
-two `lasym` cases, with no differing values. They cover
-fixed boundary (`solovev`, `solovev_analytical`, `solovev_no_axis`,
-`circular_tokamak`, `cma`, `near_axis_iota_nfp4`, `li383_low_res`,
-`cth_like_fixed_bdy`, `cth_like_fixed_bdy_nzeta_37`,
-`cth_like_fixed_bdy_spline_pressure`, `up_down_asym`) and free boundary
-(`solovev_free_bdy`, `solovev_free_bdy_lforbal`, `cth_like_free_bdy`,
-`cth_like_free_bdy_multigrid`, `cth_like_free_bdy_asym`), and between them the
-asymmetric solver, spline-parameterized pressure, multigrid `ns` sequences, the
-guessed magnetic axis, and the free-boundary Nestor and abscab paths.
+All 20 cases came out bit-for-bit identical, 438 datasets each and 442 for the
+five `lasym` cases. They cover fixed boundary (`solovev`, `solovev_analytical`,
+`solovev_no_axis`, `circular_tokamak`, `cma`, `near_axis_iota_nfp4`,
+`li383_low_res`, `cth_like_fixed_bdy`, `cth_like_fixed_bdy_iota`,
+`cth_like_fixed_bdy_nzeta_37`, `cth_like_fixed_bdy_spline_pressure`,
+`cth_like_fixed_bdy_asym`, `cth_like_fixed_bdy_asym_iota`, `up_down_asym`,
+`up_down_asym_current`) and free boundary (`solovev_free_bdy`,
+`solovev_free_bdy_lforbal`, `cth_like_free_bdy`, `cth_like_free_bdy_multigrid`,
+`cth_like_free_bdy_asym`), and between them the asymmetric solver, both the
+constrained-iota and constrained-current profile modes, spline-parameterized
+pressure, multigrid `ns` sequences, the guessed magnetic axis, and the
+free-boundary Nestor and abscab paths.
 
-The file also compiles and runs under Clang 18.
+A Clang 18 build of the same file reproduces the GCC results bit-for-bit on all
+20 cases.
 
 Single-threaded runs are deterministic. With multiple threads, OpenMP reductions
 sum in nondeterministic order, so the last bits can vary between runs, as in
