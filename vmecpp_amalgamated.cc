@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.3-25-gb10c06fd
+// Provenance: github.com/proximafusion/vmecpp v0.7.3-49-g2b377a9e
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -3226,7 +3226,14 @@ void hdf5_io::WriteH5Dataset(const std::vector<std::string>& vs,
   H5::DataSpace dataspace(/*rank=*/1, /*dims=*/&size);
   H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
   H5::DataSet dataset = file.createDataSet(name, str_type, dataspace);
-  dataset.write(vs.data(), str_type);
+  // A variable-length string dataset is written from an array of pointers to
+  // the characters, not from the std::string objects themselves.
+  std::vector<const char*> pointers;
+  pointers.reserve(vs.size());
+  for (const std::string& s : vs) {
+    pointers.push_back(s.c_str());
+  }
+  dataset.write(pointers.data(), str_type);
 }
 
 void hdf5_io::WriteH5Dataset(const std::string& str, const std::string& name,
@@ -3258,9 +3265,21 @@ void hdf5_io::ReadH5Dataset(std::vector<std::string>& vs,
   hsize_t size;
   space.getSimpleExtentDims(&size);
 
-  vs.resize(size);
   H5::StrType str_type(H5::PredType::C_S1, H5T_VARIABLE);
-  ds.read(vs.data(), str_type);
+  // HDF5 allocates one buffer per element and hands back the pointers, which
+  // have to be copied into the strings and then released.
+  std::vector<char*> pointers(size, nullptr);
+  ds.read(pointers.data(), str_type);
+
+  vs.resize(size);
+  for (hsize_t i = 0; i < size; ++i) {
+    vs[i] = pointers[i] == nullptr ? std::string() : std::string(pointers[i]);
+  }
+  if (size > 0) {
+    H5::DataSpace space_for_reclaim = ds.getSpace();
+    H5::DataSet::vlenReclaim(str_type, space_for_reclaim,
+                             H5::DSetMemXferPropList::DEFAULT, pointers.data());
+  }
 }
 
 void hdf5_io::ReadH5Dataset(std::string& str, const std::string& dataset,
@@ -8819,12 +8838,17 @@ void PrintMagneticConfiguration(
 #ifndef VMECPP_COMMON_MAGNETIC_FIELD_PROVIDER_MAGNETIC_FIELD_PROVIDER_LIB_H_
 #define VMECPP_COMMON_MAGNETIC_FIELD_PROVIDER_MAGNETIC_FIELD_PROVIDER_LIB_H_
 
+#include <Eigen/Dense>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 
 namespace magnetics {
+
+// A set of n points or vectors in Cartesian coordinates, row 0 holding x, row 1
+// y and row 2 z. This is the layout VMEC++ uses for point sets elsewhere.
+using RowMatrix3Xd = Eigen::Matrix<double, 3, Eigen::Dynamic, Eigen::RowMajor>;
 
 // Compute the magnetic field due to a given InfiniteStraightFilament and a
 // given current at given set of evaluation locations. A fatal error occurs if
@@ -8870,6 +8894,13 @@ absl::Status MagneticField(
     std::vector<std::vector<double> > &m_magnetic_field,
     bool check_current_carrier = true);
 
+// As above, with the evaluation locations and the result in the (3, n) layout.
+// Both must carry the same number of columns.
+absl::Status MagneticField(const MagneticConfiguration &magnetic_configuration,
+                           const RowMatrix3Xd &evaluation_positions,
+                           RowMatrix3Xd &m_magnetic_field,
+                           bool check_current_carrier = true);
+
 // ----------------
 
 // The magnetic vector potential diverges for an infinite straight filament,
@@ -8908,6 +8939,13 @@ absl::Status VectorPotential(
     std::vector<std::vector<double> > &m_vector_potential,
     bool check_current_carrier = true);
 
+// As above, with the evaluation locations and the result in the (3, n) layout.
+// Both must carry the same number of columns.
+absl::Status VectorPotential(
+    const MagneticConfiguration &magnetic_configuration,
+    const RowMatrix3Xd &evaluation_positions, RowMatrix3Xd &m_vector_potential,
+    bool check_current_carrier = true);
+
 // Compute the linking current between a given magnetic configuration
 // and a given closed curve, e.g., the magnetic axis.
 // The number of sampling points along the axis is chosen
@@ -8921,7 +8959,9 @@ absl::StatusOr<double> LinkingCurrent(
 #endif  // VMECPP_COMMON_MAGNETIC_FIELD_PROVIDER_MAGNETIC_FIELD_PROVIDER_LIB_H_
 
 
-#include <algorithm>  // max
+#include <algorithm>  // fill, max
+#include <cstddef>
+#include <span>
 #include <sstream>
 #include <vector>
 
@@ -8936,24 +8976,79 @@ using composed_types::FourierCoefficient1D;
 using composed_types::Normalize;
 using composed_types::Vector3d;
 
-absl::Status MagneticField(
-    const InfiniteStraightFilament& infinite_straight_filament, double current,
-    const std::vector<std::vector<double>>& evaluation_positions,
-    std::vector<std::vector<double>>& m_magnetic_field,
-    bool check_current_carrier) {
-  if (check_current_carrier) {
-    absl::Status status =
-        IsInfiniteStraightFilamentFullyPopulated(infinite_straight_filament);
-    if (!status.ok()) {
-      // Do not modify m_magnetic_field if the current carrier is not
-      // well-defined.
-      return status;
-    }
-  }
+namespace {
 
+// ABSCAB takes point sets as flat arrays in array-of-structs order
+// (x0, y0, z0, x1, y1, z1, ...), and declares its input pointers non-const
+// without writing through them, hence the mutable spans below. Converting into
+// and out of that order is done once per MagneticConfiguration rather than once
+// per current carrier.
+
+std::vector<double> ToAbscabOrder(
+    const std::vector<std::vector<double>>& positions) {
+  const std::size_t number_of_positions = positions.size();
+  std::vector<double> flat(number_of_positions * 3);
+  for (std::size_t i = 0; i < number_of_positions; ++i) {
+    flat[i * 3 + 0] = positions[i][0];
+    flat[i * 3 + 1] = positions[i][1];
+    flat[i * 3 + 2] = positions[i][2];
+  }
+  return flat;
+}
+
+std::vector<double> ToAbscabOrder(const RowMatrix3Xd& positions) {
+  const auto number_of_positions = static_cast<std::size_t>(positions.cols());
+  std::vector<double> flat(number_of_positions * 3);
+  for (std::size_t i = 0; i < number_of_positions; ++i) {
+    const auto column = static_cast<Eigen::Index>(i);
+    flat[i * 3 + 0] = positions(0, column);
+    flat[i * 3 + 1] = positions(1, column);
+    flat[i * 3 + 2] = positions(2, column);
+  }
+  return flat;
+}
+
+std::vector<double> VerticesInAbscabOrder(
+    const PolygonFilament& polygon_filament) {
+  const int number_of_vertices = polygon_filament.vertices_size();
+  std::vector<double> flat(static_cast<std::size_t>(number_of_vertices) * 3);
+  for (int i = 0; i < number_of_vertices; ++i) {
+    const Vector3d& vertex = polygon_filament.vertices(i);
+    flat[i * 3 + 0] = vertex.x();
+    flat[i * 3 + 1] = vertex.y();
+    flat[i * 3 + 2] = vertex.z();
+  }
+  return flat;
+}
+
+void AddFromAbscabOrder(const std::vector<double>& contribution,
+                        std::vector<std::vector<double>>& m_target) {
+  for (std::size_t i = 0; i < m_target.size(); ++i) {
+    m_target[i][0] += contribution[i * 3 + 0];
+    m_target[i][1] += contribution[i * 3 + 1];
+    m_target[i][2] += contribution[i * 3 + 2];
+  }
+}
+
+void AddFromAbscabOrder(const std::vector<double>& contribution,
+                        RowMatrix3Xd& m_target) {
+  for (Eigen::Index column = 0; column < m_target.cols(); ++column) {
+    const auto i = static_cast<std::size_t>(column);
+    m_target(0, column) += contribution[i * 3 + 0];
+    m_target(1, column) += contribution[i * 3 + 1];
+    m_target(2, column) += contribution[i * 3 + 2];
+  }
+}
+
+// The contribution of a single current carrier, added into m_contribution in
+// ABSCAB order. The current carrier is taken to have been checked already.
+
+void AddMagneticField(
+    const InfiniteStraightFilament& infinite_straight_filament, double current,
+    std::span<double> evaluation_positions, std::span<double> m_contribution) {
   if (current == 0.0) {
-    // no current -> no modification
-    return absl::OkStatus();
+    // no current -> no contribution
+    return;
   }
   const double magnetic_field_scale = abscab::MU_0 * current / (2.0 * M_PI);
 
@@ -8977,11 +9072,11 @@ absl::Status MagneticField(
   const double origin_y = origin.y();
   const double origin_z = origin.z();
 
-  const std::size_t num_evaluation_locations = evaluation_positions.size();
+  const std::size_t num_evaluation_locations = evaluation_positions.size() / 3;
   for (std::size_t i = 0; i < num_evaluation_locations; ++i) {
-    const double evaluation_position_x = evaluation_positions[i][0];
-    const double evaluation_position_y = evaluation_positions[i][1];
-    const double evaluation_position_z = evaluation_positions[i][2];
+    const double evaluation_position_x = evaluation_positions[i * 3 + 0];
+    const double evaluation_position_y = evaluation_positions[i * 3 + 1];
+    const double evaluation_position_z = evaluation_positions[i * 3 + 2];
 
     // connection vector from evaluation position to origin on filament
     const double delta_eval_origin_x = origin_x - evaluation_position_x;
@@ -9052,10 +9147,251 @@ absl::Status MagneticField(
         toroidal_unit_vector_z * magnetic_field_strength;
 
     // add to target storage
-    m_magnetic_field[i][0] += magnetic_field_vector_x;
-    m_magnetic_field[i][1] += magnetic_field_vector_y;
-    m_magnetic_field[i][2] += magnetic_field_vector_z;
+    m_contribution[i * 3 + 0] += magnetic_field_vector_x;
+    m_contribution[i * 3 + 1] += magnetic_field_vector_y;
+    m_contribution[i * 3 + 2] += magnetic_field_vector_z;
   }
+}  // AddMagneticField for InfiniteStraightFilament
+
+void AddMagneticField(const CircularFilament& circular_filament, double current,
+                      std::span<double> evaluation_positions,
+                      std::span<double> m_contribution) {
+  const Vector3d& center_vector = circular_filament.center();
+  std::vector<double> center = {
+      center_vector.x(),
+      center_vector.y(),
+      center_vector.z(),
+  };
+
+  const Vector3d& normal_vector = circular_filament.normal();
+  std::vector<double> normal = {
+      normal_vector.x(),
+      normal_vector.y(),
+      normal_vector.z(),
+  };
+
+  const double radius = circular_filament.radius();
+
+  abscab::magneticFieldCircularFilament(
+      center.data(), normal.data(), radius, current,
+      static_cast<int>(evaluation_positions.size() / 3),
+      evaluation_positions.data(), m_contribution.data());
+}  // AddMagneticField for CircularFilament
+
+void AddMagneticField(const PolygonFilament& polygon_filament, double current,
+                      std::span<double> evaluation_positions,
+                      std::span<double> m_contribution) {
+  std::vector<double> vertices = VerticesInAbscabOrder(polygon_filament);
+
+  abscab::magneticFieldPolygonFilament(
+      polygon_filament.vertices_size(), vertices.data(), current,
+      static_cast<int>(evaluation_positions.size() / 3),
+      evaluation_positions.data(), m_contribution.data());
+}  // AddMagneticField for PolygonFilament
+
+void AddVectorPotential(const CircularFilament& circular_filament,
+                        double current, std::span<double> evaluation_positions,
+                        std::span<double> m_contribution) {
+  const Vector3d& center_vector = circular_filament.center();
+  std::vector<double> center = {
+      center_vector.x(),
+      center_vector.y(),
+      center_vector.z(),
+  };
+
+  const Vector3d& normal_vector = circular_filament.normal();
+  std::vector<double> normal = {
+      normal_vector.x(),
+      normal_vector.y(),
+      normal_vector.z(),
+  };
+
+  const double radius = circular_filament.radius();
+
+  // Negated because abscab's circular-filament vector potential has the
+  // opposite sign convention to its polygon-filament one and to both of its
+  // magnetic-field routines. With the negation, A is parallel to the current
+  // that produces it, which agrees with MAKEGRID and with the closed form
+  // checked in VectorPotential.CheckCircularFilament.
+  abscab::vectorPotentialCircularFilament(
+      center.data(), normal.data(), radius, -current,
+      static_cast<int>(evaluation_positions.size() / 3),
+      evaluation_positions.data(), m_contribution.data());
+}  // AddVectorPotential for CircularFilament
+
+void AddVectorPotential(const PolygonFilament& polygon_filament, double current,
+                        std::span<double> evaluation_positions,
+                        std::span<double> m_contribution) {
+  std::vector<double> vertices = VerticesInAbscabOrder(polygon_filament);
+
+  abscab::vectorPotentialPolygonFilament(
+      polygon_filament.vertices_size(), vertices.data(), current,
+      static_cast<int>(evaluation_positions.size() / 3),
+      evaluation_positions.data(), m_contribution.data());
+}  // AddVectorPotential for PolygonFilament
+
+// The current of a coil within a serial circuit.
+// NOTE: Re-compute the circuit current "from scratch" in every iteration.
+// Otherwise, the number of winding of the different coils
+// all get multiplied on top of each other for each successive coil!
+double CoilCurrent(const SerialCircuit& serial_circuit, const Coil& coil) {
+  if (coil.has_num_windings()) {
+    return serial_circuit.current() * coil.num_windings();
+  }
+  // assume num_windings = 1, if not provided
+  return serial_circuit.current();
+}
+
+absl::Status UnsupportedCurrentCarrier(const CurrentCarrier& current_carrier) {
+  std::stringstream error_message;
+  error_message << "current carrier type ";
+  error_message << current_carrier.type_case();
+  error_message << " not implemented yet.";
+  return absl::InvalidArgumentError(error_message.str());
+}
+
+// Walk the current carriers of a MagneticConfiguration and add each
+// contribution into m_target. Every carrier gets a freshly zeroed scratch
+// buffer that is added on afterwards, so contributions are summed in the same
+// order and with the same rounding as when each carrier is evaluated on its
+// own.
+template <typename Target>
+absl::Status AccumulateMagneticField(
+    const MagneticConfiguration& magnetic_configuration,
+    std::span<double> evaluation_positions, Target& m_target) {
+  std::vector<double> contribution(evaluation_positions.size(), 0.0);
+
+  for (const SerialCircuit& serial_circuit :
+       magnetic_configuration.serial_circuits()) {
+    if (!serial_circuit.has_current() || serial_circuit.current() == 0.0) {
+      // skip contributions with assumed zero current
+      continue;
+    }
+
+    for (const Coil& coil : serial_circuit.coils()) {
+      const double current = CoilCurrent(serial_circuit, coil);
+
+      for (const CurrentCarrier& current_carrier : coil.current_carriers()) {
+        std::fill(contribution.begin(), contribution.end(), 0.0);
+        switch (current_carrier.type_case()) {
+          case CurrentCarrier::TypeCase::kInfiniteStraightFilament:
+            AddMagneticField(current_carrier.infinite_straight_filament(),
+                             current, evaluation_positions, contribution);
+            break;
+          case CurrentCarrier::TypeCase::kCircularFilament:
+            AddMagneticField(current_carrier.circular_filament(), current,
+                             evaluation_positions, contribution);
+            break;
+          case CurrentCarrier::TypeCase::kPolygonFilament:
+            AddMagneticField(current_carrier.polygon_filament(), current,
+                             evaluation_positions, contribution);
+            break;
+          case CurrentCarrier::TypeCase::kTypeNotSet:
+            // consider as empty CurrentCarrier -> ignore
+            continue;
+          default:
+            return UnsupportedCurrentCarrier(current_carrier);
+        }
+        AddFromAbscabOrder(contribution, m_target);
+      }  // CurrentCarrier
+    }  // Coil
+  }  // SerialCircuit
+
+  return absl::OkStatus();
+}  // AccumulateMagneticField
+
+template <typename Target>
+absl::Status AccumulateVectorPotential(
+    const MagneticConfiguration& magnetic_configuration,
+    std::span<double> evaluation_positions, Target& m_target) {
+  std::vector<double> contribution(evaluation_positions.size(), 0.0);
+
+  for (const SerialCircuit& serial_circuit :
+       magnetic_configuration.serial_circuits()) {
+    if (!serial_circuit.has_current() || serial_circuit.current() == 0.0) {
+      // skip contributions with assumed zero current
+      continue;
+    }
+
+    for (const Coil& coil : serial_circuit.coils()) {
+      const double current = CoilCurrent(serial_circuit, coil);
+
+      for (const CurrentCarrier& current_carrier : coil.current_carriers()) {
+        std::fill(contribution.begin(), contribution.end(), 0.0);
+        switch (current_carrier.type_case()) {
+          case CurrentCarrier::TypeCase::kInfiniteStraightFilament:
+            // The magnetic vector potential diverges for an infinite straight
+            // filament, so do not compute a contribution from it here. This
+            // should have been checked for alreay above, but programmers look
+            // both ways in a one-way street...
+            LOG(FATAL) << "Cannot compute the magnetic vector potential of an "
+                          "infinite straight filament.";
+            break;
+          case CurrentCarrier::TypeCase::kCircularFilament:
+            AddVectorPotential(current_carrier.circular_filament(), current,
+                               evaluation_positions, contribution);
+            break;
+          case CurrentCarrier::TypeCase::kPolygonFilament:
+            AddVectorPotential(current_carrier.polygon_filament(), current,
+                               evaluation_positions, contribution);
+            break;
+          case CurrentCarrier::TypeCase::kTypeNotSet:
+            // consider as empty CurrentCarrier -> ignore
+            continue;
+          default:
+            return UnsupportedCurrentCarrier(current_carrier);
+        }
+        AddFromAbscabOrder(contribution, m_target);
+      }  // CurrentCarrier
+    }  // Coil
+  }  // SerialCircuit
+
+  return absl::OkStatus();
+}  // AccumulateVectorPotential
+
+// The magnetic vector potential diverges for an infinite straight filament, so
+// a MagneticConfiguration carrying one has no vector potential to report.
+absl::Status CheckFreeOfInfiniteStraightFilaments(
+    const MagneticConfiguration& magnetic_configuration) {
+  for (const SerialCircuit& serial_circuit :
+       magnetic_configuration.serial_circuits()) {
+    for (const Coil& coil : serial_circuit.coils()) {
+      for (const CurrentCarrier& current_carrier : coil.current_carriers()) {
+        if (current_carrier.has_infinite_straight_filament()) {
+          return absl::InvalidArgumentError(
+              "Cannot compute the magnetic vector potential of an infinite "
+              "straight filament.");
+        }
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace
+
+absl::Status MagneticField(
+    const InfiniteStraightFilament& infinite_straight_filament, double current,
+    const std::vector<std::vector<double>>& evaluation_positions,
+    std::vector<std::vector<double>>& m_magnetic_field,
+    bool check_current_carrier) {
+  if (check_current_carrier) {
+    absl::Status status =
+        IsInfiniteStraightFilamentFullyPopulated(infinite_straight_filament);
+    if (!status.ok()) {
+      // Do not modify m_magnetic_field if the current carrier is not
+      // well-defined.
+      return status;
+    }
+  }
+
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  std::vector<double> contribution(evaluation_positions_flat.size(), 0.0);
+
+  AddMagneticField(infinite_straight_filament, current,
+                   evaluation_positions_flat, contribution);
+  AddFromAbscabOrder(contribution, m_magnetic_field);
 
   return absl::OkStatus();
 }  // MagneticField for InfiniteStraightFilament
@@ -9074,50 +9410,13 @@ absl::Status MagneticField(
     }
   }
 
-  const Vector3d& center_vector = circular_filament.center();
-  std::vector<double> center = {
-      center_vector.x(),
-      center_vector.y(),
-      center_vector.z(),
-  };
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  std::vector<double> contribution(evaluation_positions_flat.size(), 0.0);
 
-  const Vector3d& normal_vector = circular_filament.normal();
-  std::vector<double> normal = {
-      normal_vector.x(),
-      normal_vector.y(),
-      normal_vector.z(),
-  };
-
-  const double radius = circular_filament.radius();
-
-  const int number_evaluation_positions =
-      static_cast<int>(evaluation_positions.size());
-
-  std::vector<double> evaluation_positions_1d(number_evaluation_positions * 3);
-
-  // convert evaluation_positions into double[] array for abscab
-  // in array-of-structs order (x0, y0, z0, x1, y1, z1, x2, y2, z2, ...)
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    evaluation_positions_1d[i * 3 + 0] = evaluation_positions[i][0];
-    evaluation_positions_1d[i * 3 + 1] = evaluation_positions[i][1];
-    evaluation_positions_1d[i * 3 + 2] = evaluation_positions[i][2];
-  }
-
-  // target storage for magnetic field needs to be initialized to zero,
-  // as abscab methods only add and do not initialize
-  std::vector<double> magnetic_field_1d(number_evaluation_positions * 3, 0.0);
-
-  abscab::magneticFieldCircularFilament(center.data(), normal.data(), radius,
-                                        current, number_evaluation_positions,
-                                        evaluation_positions_1d.data(),
-                                        magnetic_field_1d.data());
-
-  // convert magneticField from abscab format and add to provided vectors
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    m_magnetic_field[i][0] += magnetic_field_1d[i * 3 + 0];
-    m_magnetic_field[i][1] += magnetic_field_1d[i * 3 + 1];
-    m_magnetic_field[i][2] += magnetic_field_1d[i * 3 + 2];
-  }
+  AddMagneticField(circular_filament, current, evaluation_positions_flat,
+                   contribution);
+  AddFromAbscabOrder(contribution, m_magnetic_field);
 
   return absl::OkStatus();
 }  // MagneticField for CircularFilament
@@ -9136,44 +9435,13 @@ absl::Status MagneticField(
     }
   }
 
-  const int number_evaluation_positions =
-      static_cast<int>(evaluation_positions.size());
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  std::vector<double> contribution(evaluation_positions_flat.size(), 0.0);
 
-  std::vector<double> evaluation_positions_1d(number_evaluation_positions * 3);
-
-  // convert evaluation_positions into double[] array for abscab
-  // in array-of-structs order (x0, y0, z0, x1, y1, z1, x2, y2, z2, ...)
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    evaluation_positions_1d[i * 3 + 0] = evaluation_positions[i][0];
-    evaluation_positions_1d[i * 3 + 1] = evaluation_positions[i][1];
-    evaluation_positions_1d[i * 3 + 2] = evaluation_positions[i][2];
-  }
-
-  // target storage for magnetic field needs to be initialized to zero,
-  // as abscab methods only add and not initialize
-  std::vector<double> magnetic_field_1d(number_evaluation_positions * 3, 0.0);
-
-  std::vector<double> vertices_1d(polygon_filament.vertices_size() * 3);
-
-  // copy filament geometry into one-dimensional array for ABSCAB
-  for (int i = 0; i < polygon_filament.vertices_size(); ++i) {
-    const Vector3d& vertex = polygon_filament.vertices(i);
-    vertices_1d[i * 3 + 0] = vertex.x();
-    vertices_1d[i * 3 + 1] = vertex.y();
-    vertices_1d[i * 3 + 2] = vertex.z();
-  }
-
-  abscab::magneticFieldPolygonFilament(
-      polygon_filament.vertices_size(), vertices_1d.data(), current,
-      number_evaluation_positions, evaluation_positions_1d.data(),
-      magnetic_field_1d.data());
-
-  // convert magneticField from abscab format and add to provided vectors
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    m_magnetic_field[i][0] += magnetic_field_1d[i * 3 + 0];
-    m_magnetic_field[i][1] += magnetic_field_1d[i * 3 + 1];
-    m_magnetic_field[i][2] += magnetic_field_1d[i * 3 + 2];
-  }
+  AddMagneticField(polygon_filament, current, evaluation_positions_flat,
+                   contribution);
+  AddFromAbscabOrder(contribution, m_magnetic_field);
 
   return absl::OkStatus();
 }  // MagneticField for PolygonFilament
@@ -9193,63 +9461,36 @@ absl::Status MagneticField(
     }
   }
 
-  for (const SerialCircuit& serial_circuit :
-       magnetic_configuration.serial_circuits()) {
-    if (!serial_circuit.has_current() || serial_circuit.current() == 0.0) {
-      // skip contributions with assumed zero current
-      continue;
-    }
-
-    for (const Coil& coil : serial_circuit.coils()) {
-      // NOTE: Re-compute the circuit current "from scratch" in every iteration.
-      // Otherwise, the number of winding of the different coils
-      // all get multiplied on top of each other for each successive coil!
-      double current = 0.0;
-      if (coil.has_num_windings()) {
-        current = serial_circuit.current() * coil.num_windings();
-      } else {
-        // assume num_windings = 1, if not provided
-        current = serial_circuit.current();
-      }
-
-      for (const CurrentCarrier& current_carrier : coil.current_carriers()) {
-        switch (current_carrier.type_case()) {
-          case CurrentCarrier::TypeCase::kInfiniteStraightFilament:
-            CHECK_OK(MagneticField(current_carrier.infinite_straight_filament(),
-                                   current, evaluation_positions,
-                                   m_magnetic_field, false));
-            break;
-          case CurrentCarrier::TypeCase::kCircularFilament:
-            CHECK_OK(MagneticField(current_carrier.circular_filament(), current,
-                                   evaluation_positions, m_magnetic_field,
-                                   false));
-            break;
-          case CurrentCarrier::TypeCase::kPolygonFilament:
-            CHECK_OK(MagneticField(current_carrier.polygon_filament(), current,
-                                   evaluation_positions, m_magnetic_field,
-                                   false));
-            break;
-          case CurrentCarrier::TypeCase::kTypeNotSet:
-            // consider as empty CurrentCarrier -> ignore
-            break;
-          default:
-            std::stringstream error_message;
-            error_message << "current carrier type ";
-            error_message << current_carrier.type_case();
-            error_message << " not implemented yet.";
-            return absl::InvalidArgumentError(error_message.str());
-        }
-      }  // CurrentCarrier
-    }  // Coil
-  }  // SerialCircuit
-
-  return absl::OkStatus();
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  return AccumulateMagneticField(magnetic_configuration,
+                                 evaluation_positions_flat, m_magnetic_field);
 }  // MagneticField for MagneticConfiguration
 
-// ----------------
+absl::Status MagneticField(const MagneticConfiguration& magnetic_configuration,
+                           const RowMatrix3Xd& evaluation_positions,
+                           RowMatrix3Xd& m_magnetic_field,
+                           bool check_current_carrier) {
+  CHECK_EQ(m_magnetic_field.cols(), evaluation_positions.cols())
+      << "one magnetic field vector per evaluation position is required";
 
-// The magnetic vector potential diverges for an infinite straight filament,
-// so there is no method to compute a contribution from it here.
+  if (check_current_carrier) {
+    absl::Status status =
+        IsMagneticConfigurationFullyPopulated(magnetic_configuration);
+    if (!status.ok()) {
+      // Do not modify m_magnetic_field if the current carrier is not
+      // well-defined.
+      return status;
+    }
+  }
+
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  return AccumulateMagneticField(magnetic_configuration,
+                                 evaluation_positions_flat, m_magnetic_field);
+}  // MagneticField for MagneticConfiguration, Eigen layout
+
+// ----------------
 
 absl::Status VectorPotential(
     const CircularFilament& circular_filament, double current,
@@ -9265,55 +9506,13 @@ absl::Status VectorPotential(
     }
   }
 
-  const Vector3d& center_vector = circular_filament.center();
-  std::vector<double> center = {
-      center_vector.x(),
-      center_vector.y(),
-      center_vector.z(),
-  };
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  std::vector<double> contribution(evaluation_positions_flat.size(), 0.0);
 
-  const Vector3d& normal_vector = circular_filament.normal();
-  std::vector<double> normal = {
-      normal_vector.x(),
-      normal_vector.y(),
-      normal_vector.z(),
-  };
-
-  const double radius = circular_filament.radius();
-
-  const int number_evaluation_positions =
-      static_cast<int>(evaluation_positions.size());
-
-  std::vector<double> evaluation_positions_1d(number_evaluation_positions * 3);
-
-  // convert evaluation_positions into double[] array for abscab
-  // in array-of-structs order (x0, y0, z0, x1, y1, z1, x2, y2, z2, ...)
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    evaluation_positions_1d[i * 3 + 0] = evaluation_positions[i][0];
-    evaluation_positions_1d[i * 3 + 1] = evaluation_positions[i][1];
-    evaluation_positions_1d[i * 3 + 2] = evaluation_positions[i][2];
-  }
-
-  // target storage for magnetic field needs to be initialized to zero,
-  // as abscab methods only add and do not initialize
-  std::vector<double> vector_potential_1d(number_evaluation_positions * 3, 0.0);
-
-  // Negated because abscab's circular-filament vector potential has the
-  // opposite sign convention to its polygon-filament one and to both of its
-  // magnetic-field routines. With the negation, A is parallel to the current
-  // that produces it, which agrees with MAKEGRID and with the closed form
-  // checked in VectorPotential.CheckCircularFilament.
-  abscab::vectorPotentialCircularFilament(center.data(), normal.data(), radius,
-                                          -current, number_evaluation_positions,
-                                          evaluation_positions_1d.data(),
-                                          vector_potential_1d.data());
-
-  // convert magneticField from abscab format and add to provided vectors
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    m_vector_potential[i][0] += vector_potential_1d[i * 3 + 0];
-    m_vector_potential[i][1] += vector_potential_1d[i * 3 + 1];
-    m_vector_potential[i][2] += vector_potential_1d[i * 3 + 2];
-  }
+  AddVectorPotential(circular_filament, current, evaluation_positions_flat,
+                     contribution);
+  AddFromAbscabOrder(contribution, m_vector_potential);
 
   return absl::OkStatus();
 }  // VectorPotential for CircularFilament
@@ -9326,50 +9525,19 @@ absl::Status VectorPotential(
   if (check_current_carrier) {
     absl::Status status = IsPolygonFilamentFullyPopulated(polygon_filament);
     if (!status.ok()) {
-      // Do not modify m_magnetic_field if the current carrier is not
+      // Do not modify m_vector_potential if the current carrier is not
       // well-defined.
       return status;
     }
   }
 
-  const int number_evaluation_positions =
-      static_cast<int>(evaluation_positions.size());
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  std::vector<double> contribution(evaluation_positions_flat.size(), 0.0);
 
-  std::vector<double> evaluation_positions_1d(number_evaluation_positions * 3);
-
-  // convert evaluation_positions into double[] array for abscab
-  // in array-of-structs order (x0, y0, z0, x1, y1, z1, x2, y2, z2, ...)
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    evaluation_positions_1d[i * 3 + 0] = evaluation_positions[i][0];
-    evaluation_positions_1d[i * 3 + 1] = evaluation_positions[i][1];
-    evaluation_positions_1d[i * 3 + 2] = evaluation_positions[i][2];
-  }
-
-  // target storage for magnetic field needs to be initialized to zero,
-  // as abscab methods only add and not initialize
-  std::vector<double> vector_potential_1d(number_evaluation_positions * 3, 0.0);
-
-  std::vector<double> vertices_1d(polygon_filament.vertices_size() * 3);
-
-  // copy filament geometry into one-dimensional array for ABSCAB
-  for (int i = 0; i < polygon_filament.vertices_size(); ++i) {
-    const Vector3d& vertex = polygon_filament.vertices(i);
-    vertices_1d[i * 3 + 0] = vertex.x();
-    vertices_1d[i * 3 + 1] = vertex.y();
-    vertices_1d[i * 3 + 2] = vertex.z();
-  }
-
-  abscab::vectorPotentialPolygonFilament(
-      polygon_filament.vertices_size(), vertices_1d.data(), current,
-      number_evaluation_positions, evaluation_positions_1d.data(),
-      vector_potential_1d.data());
-
-  // convert magneticField from abscab format and add to provided vectors
-  for (int i = 0; i < number_evaluation_positions; ++i) {
-    m_vector_potential[i][0] += vector_potential_1d[i * 3 + 0];
-    m_vector_potential[i][1] += vector_potential_1d[i * 3 + 1];
-    m_vector_potential[i][2] += vector_potential_1d[i * 3 + 2];
-  }
+  AddVectorPotential(polygon_filament, current, evaluation_positions_flat,
+                     contribution);
+  AddFromAbscabOrder(contribution, m_vector_potential);
 
   return absl::OkStatus();
 }  // VectorPotential for PolygonFilament
@@ -9388,78 +9556,45 @@ absl::Status VectorPotential(
       return status;
     }
 
-    // Check that no InfiniteStraightFilament is present in the
-    // MagneticConfiguration, as the magnetic vector potential diverges for this
-    // type of current carrier.
-    for (const SerialCircuit& serial_circuit :
-         magnetic_configuration.serial_circuits()) {
-      for (const Coil& coil : serial_circuit.coils()) {
-        for (const CurrentCarrier& current_carrier : coil.current_carriers()) {
-          if (current_carrier.has_infinite_straight_filament()) {
-            return absl::InvalidArgumentError(
-                "Cannot compute the magnetic vector potential of an infinite "
-                "straight filament.");
-          }
-        }
-      }
+    status = CheckFreeOfInfiniteStraightFilaments(magnetic_configuration);
+    if (!status.ok()) {
+      return status;
     }
   }
 
-  for (const SerialCircuit& serial_circuit :
-       magnetic_configuration.serial_circuits()) {
-    if (!serial_circuit.has_current() || serial_circuit.current() == 0.0) {
-      // skip contributions with assumed zero current
-      continue;
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  return AccumulateVectorPotential(
+      magnetic_configuration, evaluation_positions_flat, m_vector_potential);
+}  // VectorPotential for MagneticConfiguration
+
+absl::Status VectorPotential(
+    const MagneticConfiguration& magnetic_configuration,
+    const RowMatrix3Xd& evaluation_positions, RowMatrix3Xd& m_vector_potential,
+    bool check_current_carrier) {
+  CHECK_EQ(m_vector_potential.cols(), evaluation_positions.cols())
+      << "one vector potential per evaluation position is required";
+
+  if (check_current_carrier) {
+    absl::Status status =
+        IsMagneticConfigurationFullyPopulated(magnetic_configuration);
+    if (!status.ok()) {
+      // Do not modify m_vector_potential if the current carrier is not
+      // well-defined.
+      return status;
     }
 
-    for (const Coil& coil : serial_circuit.coils()) {
-      // NOTE: Re-compute the circuit current "from scratch" in every iteration.
-      // Otherwise, the number of winding of the different coils
-      // all get multiplied on top of each other for each successive coil!
-      double current = 0.0;
-      if (coil.has_num_windings()) {
-        current = serial_circuit.current() * coil.num_windings();
-      } else {
-        // assume num_windings = 1, if not provided
-        current = serial_circuit.current();
-      }
+    status = CheckFreeOfInfiniteStraightFilaments(magnetic_configuration);
+    if (!status.ok()) {
+      return status;
+    }
+  }
 
-      for (const CurrentCarrier& current_carrier : coil.current_carriers()) {
-        switch (current_carrier.type_case()) {
-          case CurrentCarrier::TypeCase::kInfiniteStraightFilament:
-            // The magnetic vector potential diverges for an infinite straight
-            // filament, so do not compute a contribution from it here. This
-            // should have been checked for alreay above, but programmers look
-            // both ways in a one-way street...
-            LOG(FATAL) << "Cannot compute the magnetic vector potential of an "
-                          "infinite straight filament.";
-            break;
-          case CurrentCarrier::TypeCase::kCircularFilament:
-            CHECK_OK(VectorPotential(current_carrier.circular_filament(),
-                                     current, evaluation_positions,
-                                     m_vector_potential, false));
-            break;
-          case CurrentCarrier::TypeCase::kPolygonFilament:
-            CHECK_OK(VectorPotential(current_carrier.polygon_filament(),
-                                     current, evaluation_positions,
-                                     m_vector_potential, false));
-            break;
-          case CurrentCarrier::TypeCase::kTypeNotSet:
-            // consider as empty CurrentCarrier -> ignore
-            break;
-          default:
-            std::stringstream error_message;
-            error_message << "current carrier type ";
-            error_message << current_carrier.type_case();
-            error_message << " not implemented yet.";
-            return absl::InvalidArgumentError(error_message.str());
-        }
-      }  // CurrentCarrier
-    }  // Coil
-  }  // SerialCircuit
-
-  return absl::OkStatus();
-}  // VectorPotential for MagneticConfiguration
+  std::vector<double> evaluation_positions_flat =
+      ToAbscabOrder(evaluation_positions);
+  return AccumulateVectorPotential(
+      magnetic_configuration, evaluation_positions_flat, m_vector_potential);
+}  // VectorPotential for MagneticConfiguration, Eigen layout
 
 absl::StatusOr<double> LinkingCurrent(
     const MagneticConfiguration& magnetic_configuration,
@@ -10004,7 +10139,9 @@ absl::StatusOr<MakegridParameters> ImportMakegridParametersFromFile(
     const std::filesystem::path& makegrid_parameters_file) {
   const auto maybe_makegrid_params_json =
       file_io::ReadFile(makegrid_parameters_file);
-  CHECK_OK(maybe_makegrid_params_json);
+  if (!maybe_makegrid_params_json.ok()) {
+    return maybe_makegrid_params_json.status();
+  }
   const auto& makegrid_params_json = *maybe_makegrid_params_json;
   return ImportMakegridParametersFromJson(makegrid_params_json);
 }  // ImportMakegridParametersFromFile
@@ -10244,26 +10381,9 @@ absl::StatusOr<MagneticFieldResponseTable> ComputeMagneticFieldResponseTable(
       continue;
     }
 
-    // Evaluation result B (n, 3) in cartesian coordinates
-    // TODO(jurasic) Remove after Eigen refactor
-    std::vector<std::vector<double>> magnetic_field_stl(
-        number_of_evaluation_points);
-    for (int i = 0; i < number_of_evaluation_points; ++i) {
-      magnetic_field_stl[i].resize(3, 0.0);
-    }
-
-    // TODO(jurasic) Remove after Eigen refactor
-    std::vector<std::vector<double>> cylindrical_grid_stl{
-        static_cast<std::size_t>(maybe_cylindrical_grid.value().cols())};
-    CHECK_EQ(static_cast<std::size_t>(number_of_evaluation_points),
-             cylindrical_grid_stl.size());
-    for (int i = 0; i < number_of_evaluation_points; ++i) {
-      cylindrical_grid_stl[i].resize(3);
-      for (int j = 0; j < 3; ++j) {
-        cylindrical_grid_stl[i][j] = maybe_cylindrical_grid.value()(j, i);
-      }
-    }
-    CHECK_EQ(magnetic_field_stl.size(), cylindrical_grid_stl.size());
+    // Evaluation result B (3, n) in cartesian coordinates
+    RowMatrix3Xd magnetic_field =
+        RowMatrix3Xd::Zero(3, number_of_evaluation_points);
 
     // We parallelize over linear index of evaluation locations, since that
     // allows us to use more CPUs and parallelize also for configurations with
@@ -10272,15 +10392,12 @@ absl::StatusOr<MagneticFieldResponseTable> ComputeMagneticFieldResponseTable(
     // independent circuits but few evaluation locations. This is done inside of
     // ABSCAB, which is used within this call to `MagneticField`.
     absl::Status magnetic_field_status =
-        MagneticField(m_magnetic_configuration, cylindrical_grid_stl,
-                      /*m_magnetic_field=*/magnetic_field_stl);
+        MagneticField(m_magnetic_configuration, maybe_cylindrical_grid.value(),
+                      /*m_magnetic_field=*/magnetic_field);
     if (!magnetic_field_status.ok()) {
       status[circuit_index] = magnetic_field_status;
       continue;
     }
-    RowMatrix3Xd magnetic_field =
-        RowMatrix3Xd::Zero(3, number_of_evaluation_points);
-    magnetic_field = vmecpp::ToEigenMatrix(magnetic_field_stl).transpose();
     CartesianToCylindricalField(cos_phi, sin_phi, magnetic_field, num_z, num_r,
                                 number_of_evaluation_points,
                                 response_table_b.b_r.row(circuit_index),
@@ -10406,22 +10523,9 @@ absl::StatusOr<MakegridCachedVectorPotential> ComputeVectorPotentialCache(
       continue;
     }
 
-    // TODO(jurasic) Remove after Eigen refactor
-    std::vector<std::vector<double>> vector_potential_stl(
-        number_of_evaluation_points);
-    for (int i = 0; i < number_of_evaluation_points; ++i) {
-      vector_potential_stl[i].resize(3, 0.0);
-    }
-
-    // TODO(jurasic) Remove after Eigen refactor
-    std::vector<std::vector<double>> cylindrical_grid_stl{
-        static_cast<std::size_t>(maybe_cylindrical_grid.value().cols())};
-    for (int i = 0; i < number_of_evaluation_points; ++i) {
-      cylindrical_grid_stl[i].resize(3);
-      for (int j = 0; j < 3; ++j) {
-        cylindrical_grid_stl[i][j] = maybe_cylindrical_grid.value()(j, i);
-      }
-    }
+    // Evaluation result A (3, n) in cartesian coordinates
+    RowMatrix3Xd vector_potential =
+        RowMatrix3Xd::Zero(3, number_of_evaluation_points);
 
     // We parallelize over linear index of evaluation locations, since that
     // allows us to use more CPUs and parallelize also for configurations with
@@ -10429,16 +10533,13 @@ absl::StatusOr<MakegridCachedVectorPotential> ComputeVectorPotentialCache(
     // independent circuits and many evaluation locations, rather than many
     // independent circuits but few evaluation locations. This is done inside of
     // ABSCAB, which is used within this call to `VectorPotential`.
-    absl::Status vector_potential_status =
-        VectorPotential(m_magnetic_configuration, cylindrical_grid_stl,
-                        /*m_vector_potential=*/vector_potential_stl);
+    absl::Status vector_potential_status = VectorPotential(
+        m_magnetic_configuration, maybe_cylindrical_grid.value(),
+        /*m_vector_potential=*/vector_potential);
     if (!vector_potential_status.ok()) {
       status[circuit_index] = vector_potential_status;
       continue;
     }
-    RowMatrix3Xd vector_potential =
-        RowMatrix3Xd::Zero(3, number_of_evaluation_points);
-    vector_potential = vmecpp::ToEigenMatrix(vector_potential_stl).transpose();
 
     // ABSCAB computes the Cartesian components of the vector potential,
     // so we need to convert the x and y componets into r and phi
@@ -10516,14 +10617,18 @@ absl::Status WriteMakegridNetCDFFile(
 
   // number of response tables in this mgrid file
   const int n_serial_circuits = static_cast<int>(response_table_b.b_r.rows());
-  CHECK_GT(n_serial_circuits, 0)
-      << "No magnetic field cache present to be written.";
+  if (n_serial_circuits <= 0) {
+    return absl::InvalidArgumentError(
+        "No magnetic field cache present to be written.");
+  }
 
   const int n_circuit_currents = static_cast<int>(circuit_currents.size());
-  CHECK_EQ(n_circuit_currents, n_serial_circuits) << absl::StrFormat(
-      "number of provided circuit currents (%d) has to equal number of serial "
-      "circuits(%d)",
-      n_circuit_currents, n_serial_circuits);
+  if (n_circuit_currents != n_serial_circuits) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "number of provided circuit currents (%d) has to equal number of "
+        "serial circuits (%d)",
+        n_circuit_currents, n_serial_circuits));
+  }
 
   int ncid = 0;
   CHECK_EQ(nc_create(makegrid_filename.c_str(), NC_CLOBBER, &ncid), NC_NOERR);
@@ -13040,13 +13145,6 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
   // lfreeb
   // nothing to check here: lfreeb can be true or false and both are valid...
   if (vmec_indata.lfreeb) {
-    // mgrid_file
-    // TODO(jons): if mgrid read, check for consistent nzeta
-
-    // extcur
-    // TODO(jons): check that number of coil currents matches number of response
-    // tables in mgrid file
-
     // nvacskip
     if (vmec_indata.nvacskip < 1) {
       return absl::InvalidArgumentError(absl::StrFormat(
@@ -13064,6 +13162,16 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
           absl::StrFormat("input variable 'free_boundary_method' must be "
                           "'nestor' or 'only_coils', but is %s\n",
                           ToString(vmec_indata.free_boundary_method)));
+    }
+
+    // 'only_coils' takes the field from the coils alone, so the plasma must
+    // carry neither current nor pressure.
+    if (vmec_indata.free_boundary_method == FreeBoundaryMethod::ONLY_COILS &&
+        (vmec_indata.curtor != 0.0 || vmec_indata.pres_scale != 0.0)) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "input variables 'curtor' and 'pres_scale' must be zero when "
+          "'free_boundary_method' is 'only_coils', but are %g and %g\n",
+          vmec_indata.curtor, vmec_indata.pres_scale));
     }
   }
 
@@ -13305,6 +13413,8 @@ VmecINDATA VmecINDATA::Copy() const { return *this; }
 
 #include <Eigen/Dense>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 
@@ -13358,6 +13468,11 @@ class MGridProvider {
   int nextcur;
 
   std::string mgrid_mode;
+
+  // Names of the coil groups, one per response table, as written by MAKEGRID
+  // into the mgrid file's coil_group variable. Empty when the field came from
+  // an in-memory response table, which carries no names.
+  std::vector<std::string> coil_group_names;
 
   bool IsLoaded() const { return has_mgrid_loaded_; }
 
@@ -14857,6 +14972,7 @@ void LaplaceSolver::SolveForPotential(
 #include <netcdf.h>
 
 #include <algorithm>
+#include <array>
 #include <cfloat>  // DBL_MAX
 #include <cstdio>
 #include <fstream>
@@ -15019,6 +15135,37 @@ absl::Status MGridProvider::LoadFile(const std::filesystem::path& filename,
   numPhi = *num_phi_or;
 
   nextcur = *nextcur_or;
+
+  // coil_group is a [nextcur][string width] character array, each name padded
+  // on the right. The width is whatever the file declares, so a writer that
+  // does not use MAKEGRID's 30 still reads correctly.
+  coil_group_names.clear();
+  {
+    int id_coil_group = 0;
+    std::array<int, 2> coil_group_dimensions = {0, 0};
+    size_t string_width = 0;
+    if (nc_inq_varid(ncid, "coil_group", &id_coil_group) == NC_NOERR &&
+        nc_inq_vardimid(ncid, id_coil_group, coil_group_dimensions.data()) ==
+            NC_NOERR &&
+        nc_inq_dimlen(ncid, coil_group_dimensions[1], &string_width) ==
+            NC_NOERR &&
+        string_width > 0) {
+      std::vector<char> raw(static_cast<size_t>(nextcur) * string_width);
+      if (nc_get_var_text(ncid, id_coil_group, raw.data()) == NC_NOERR) {
+        coil_group_names.reserve(nextcur);
+        for (int i = 0; i < nextcur; ++i) {
+          std::string name(raw.data() + static_cast<size_t>(i) * string_width,
+                           string_width);
+          size_t end = name.size();
+          while (end > 0 && name[end - 1] <= 0x20) {
+            --end;
+          }
+          name.erase(end);
+          coil_group_names.push_back(name);
+        }
+      }
+    }
+  }
   if (coil_currents.size() != nextcur) {
     nc_close(ncid);
     return absl::InvalidArgumentError(
@@ -15124,6 +15271,9 @@ absl::Status MGridProvider::LoadFields(
   numPhi = mgrid_params.number_of_phi_grid_points;
 
   nextcur = static_cast<int>(coil_currents.size());
+
+  // an in-memory response table carries no coil group names
+  coil_group_names.clear();
 
   if (mgrid_params.normalize_by_currents) {
     mgrid_mode = "S";
@@ -18439,7 +18589,8 @@ RecomputeAxisWorkspace RecomputeMagneticAxisToFixJacobianSign(
   // in order to always have a full toroidal module for the Fourier transform
   // below
   if (!s.lasym) {
-    for (int k = 1; k < s.nZeta / 2; ++k) {
+    // mirror image along zeta, for even and odd nZeta
+    for (int k = 1; k <= (s.nZeta - 1) / 2; ++k) {
       const int k_reversed = (s.nZeta - k) % s.nZeta;
       w.new_r_axis[k_reversed] = w.new_r_axis[k];
       w.new_z_axis[k_reversed] = -w.new_z_axis[k];
@@ -19729,10 +19880,14 @@ class FourierGeometry : public FourierCoeffs {
   // instead of from the Fourier coefficient matrices.
   // This latter use case applies to fixed-boundary hot-restart operation of
   // VMEC++.
+  // rmns, zmnc and lmnc_full carry the non-stellarator-symmetric half of the
+  // state and are read only when lasym is set; a stellarator-symmetric run
+  // leaves them empty.
   void InitFromState(const FourierBasisFastPoloidal& fb,
                      const RowMatrixXd& rmnc, const RowMatrixXd& zmns,
-                     const RowMatrixXd& lmns_full, const RadialProfiles& p,
-                     const VmecConstants& constants,
+                     const RowMatrixXd& lmns_full, const RowMatrixXd& rmns,
+                     const RowMatrixXd& zmnc, const RowMatrixXd& lmnc_full,
+                     const RadialProfiles& p, const VmecConstants& constants,
                      const Boundaries* b = nullptr);
 
   void extrapolateTowardsAxis();
@@ -19804,6 +19959,7 @@ class FourierGeometry : public FourierCoeffs {
 #include <utility>
 #include <vector>
 
+#include "absl/log/check.h"
 
 namespace vmecpp {
 
@@ -19978,13 +20134,22 @@ void FourierGeometry::interpFromBoundaryAndAxis(
   }  // j
 }
 
-void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
-                                    const RowMatrixXd& rmnc,
-                                    const RowMatrixXd& zmns,
-                                    const RowMatrixXd& lmns_full,
-                                    const RadialProfiles& p,
-                                    const VmecConstants& constants,
-                                    const Boundaries* b) {
+void FourierGeometry::InitFromState(
+    const FourierBasisFastPoloidal& fb, const RowMatrixXd& rmnc,
+    const RowMatrixXd& zmns, const RowMatrixXd& lmns_full,
+    const RowMatrixXd& rmns, const RowMatrixXd& zmnc,
+    const RowMatrixXd& lmnc_full, const RadialProfiles& p,
+    const VmecConstants& constants, const Boundaries* b) {
+  if (s_.lasym) {
+    // The antisymmetric half must be present, or the restart would silently
+    // begin from the stellarator-symmetric projection of the given state.
+    CHECK_EQ(rmns.cols(), rmnc.cols())
+        << "InitFromState: lasym is set but rmns is missing";
+    CHECK_EQ(zmnc.cols(), zmns.cols())
+        << "InitFromState: lasym is set but zmnc is missing";
+    CHECK_EQ(lmnc_full.cols(), lmns_full.cols())
+        << "InitFromState: lasym is set but lmnc_full is missing";
+  }
   // b == nullptr -> free-boundary -> we also initialize the last surface;
   // otherwise skip the last surface here and grab it from b later
   const int max_ns_to_set_rz_on_from_state = (b == nullptr) ? ns : ns - 1;
@@ -20007,6 +20172,27 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
     fb.sin_to_sc_cs(zmns_col_vector, zmnsc_at_jF, zmncs_at_jF, s_.ntor,
                     s_.mpol);
 
+    // Antisymmetric half: R is written to the wout in the combined sine basis
+    // and Z in the combined cosine basis, i.e. mirrored with respect to the
+    // symmetric half above, so the two conversions swap accordingly.
+    std::vector<double> rmnsc_at_jF(s_.mpol * (s_.ntor + 1));
+    std::vector<double> rmncs_at_jF(s_.mpol * (s_.ntor + 1));
+    std::vector<double> zmncc_at_jF(s_.mpol * (s_.ntor + 1));
+    std::vector<double> zmnss_at_jF(s_.mpol * (s_.ntor + 1));
+    if (s_.lasym) {
+      const Eigen::VectorXd rmns_col = rmns.col(jF);
+      const std::vector<double> rmns_col_vector(
+          rmns_col.data(), rmns_col.data() + rmns_col.size());
+      fb.sin_to_sc_cs(rmns_col_vector, rmnsc_at_jF, rmncs_at_jF, s_.ntor,
+                      s_.mpol);
+
+      const Eigen::VectorXd zmnc_col = zmnc.col(jF);
+      const std::vector<double> zmnc_col_vector(
+          zmnc_col.data(), zmnc_col.data() + zmnc_col.size());
+      fb.cos_to_cc_ss(zmnc_col_vector, zmncc_at_jF, zmnss_at_jF, s_.ntor,
+                      s_.mpol);
+    }
+
     for (int m = 0; m < s_.mpol; ++m) {
       for (int n = 0; n < s_.ntor + 1; ++n) {
         const int idx_mn = m * (s_.ntor + 1) + n;
@@ -20016,6 +20202,14 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
         if (s_.lthreed) {
           rmnss[idx_jmn] = rmnss_at_jF[idx_mn];
           zmncs[idx_jmn] = zmncs_at_jF[idx_mn];
+        }
+        if (s_.lasym) {
+          rmnsc[idx_jmn] = rmnsc_at_jF[idx_mn];
+          zmncc[idx_jmn] = zmncc_at_jF[idx_mn];
+          if (s_.lthreed) {
+            rmncs[idx_jmn] = rmncs_at_jF[idx_mn];
+            zmnss[idx_jmn] = zmnss_at_jF[idx_mn];
+          }
         }
       }
     }
@@ -20034,6 +20228,16 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
     fb.sin_to_sc_cs(lmns_col_vector, lmnsc_at_jF, lmncs_at_jF, s_.ntor,
                     s_.mpol);
 
+    std::vector<double> lmncc_at_jF(s_.mpol * (s_.ntor + 1));
+    std::vector<double> lmnss_at_jF(s_.mpol * (s_.ntor + 1));
+    if (s_.lasym) {
+      const Eigen::VectorXd lmnc_col = lmnc_full.col(jF);
+      const std::vector<double> lmnc_col_vector(
+          lmnc_col.data(), lmnc_col.data() + lmnc_col.size());
+      fb.cos_to_cc_ss(lmnc_col_vector, lmncc_at_jF, lmnss_at_jF, s_.ntor,
+                      s_.mpol);
+    }
+
     for (int m = 0; m < s_.mpol; ++m) {
       for (int n = 0; n < s_.ntor + 1; ++n) {
         const int idx_mn = m * (s_.ntor + 1) + n;
@@ -20047,6 +20251,12 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
         lmnsc[idx_jmn] = lmnsc_at_jF[idx_mn] / lambda_unscaling;
         if (s_.lthreed) {
           lmncs[idx_jmn] = lmncs_at_jF[idx_mn] / lambda_unscaling;
+        }
+        if (s_.lasym) {
+          lmncc[idx_jmn] = lmncc_at_jF[idx_mn] / lambda_unscaling;
+          if (s_.lthreed) {
+            lmnss[idx_jmn] = lmnss_at_jF[idx_mn] / lambda_unscaling;
+          }
         }
       }
     }
@@ -20072,6 +20282,26 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
       std::copy(b->zbcs.begin(), b->zbcs.begin() + mnsize, zmncs_begin);
     }
 
+    if (s_.lasym) {
+      auto rmnsc_begin =
+          rmnsc.begin() + (jF - nsMin_) * s_.mpol * (s_.ntor + 1);
+      std::copy(b->rbsc.begin(), b->rbsc.begin() + mnsize, rmnsc_begin);
+
+      auto zmncc_begin =
+          zmncc.begin() + (jF - nsMin_) * s_.mpol * (s_.ntor + 1);
+      std::copy(b->zbcc.begin(), b->zbcc.begin() + mnsize, zmncc_begin);
+
+      if (s_.lthreed) {
+        auto rmncs_begin =
+            rmncs.begin() + (jF - nsMin_) * s_.mpol * (s_.ntor + 1);
+        std::copy(b->rbcs.begin(), b->rbcs.begin() + mnsize, rmncs_begin);
+
+        auto zmnss_begin =
+            zmnss.begin() + (jF - nsMin_) * s_.mpol * (s_.ntor + 1);
+        std::copy(b->zbss.begin(), b->zbss.begin() + mnsize, zmnss_begin);
+      }
+    }
+
     for (int m = 0; m < s_.mpol; ++m) {
       for (int n = 0; n < s_.ntor + 1; ++n) {
         int idx_fc = ((jF - nsMin_) * s_.mpol + m) * (s_.ntor + 1) + n;
@@ -20084,6 +20314,14 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
         if (s_.lthreed) {
           rmnss[idx_fc] *= basis_norm;
           zmncs[idx_fc] *= basis_norm;
+        }
+        if (s_.lasym) {
+          rmnsc[idx_fc] *= basis_norm;
+          zmncc[idx_fc] *= basis_norm;
+          if (s_.lthreed) {
+            rmncs[idx_fc] *= basis_norm;
+            zmnss[idx_fc] *= basis_norm;
+          }
         }
       }
     }
@@ -20108,6 +20346,12 @@ void FourierGeometry::InitFromState(const FourierBasisFastPoloidal& fb,
       lmnsc[idx_fc] = 0.0;
       if (s_.lthreed) {
         lmncs[idx_fc] = 0.0;
+      }
+      if (s_.lasym) {
+        lmncc[idx_fc] = 0.0;
+        if (s_.lthreed) {
+          lmnss[idx_fc] = 0.0;
+        }
       }
     }
   }
@@ -25144,6 +25388,10 @@ void IdealMhdModel::computeBContra() {
   }
 
   // update full-grid chi'
+  if (r_.nsMinF1 == 0) {
+    // The axis value is extrapolated the same way as iotaF below.
+    m_p_.chipF[0] = 1.5 * m_p_.chipH[0] - 0.5 * m_p_.chipH[1];
+  }
   for (int jFi = r_.nsMinFi; jFi < r_.nsMaxFi; ++jFi) {
     m_p_.chipF[jFi - r_.nsMinF1] =
         0.5 * (m_p_.chipH[jFi - r_.nsMinH] + m_p_.chipH[jFi - 1 - r_.nsMinH]);
@@ -28345,9 +28593,8 @@ struct MercierStabilityIntermediateQuantities {
   // (num_full, nZnT)
   RowMatrixXd bdotj;
 
-  // 1.0 / gpp on full-grid
+  // 1 / |grad(s)|^2 on full-grid, formed as sqrt(g)^2 / |e_theta x e_zeta|^2
   // (num_full, nZnT)
-  // TODO(jons): figure out what this really is
   RowMatrixXd gpp;
 
   // |B|^2 on half grid
@@ -28457,8 +28704,8 @@ struct Threed1FirstTableIntermediate {
   // [num_half] surface-averaged beta profile
   Eigen::VectorXd beta_vol;
 
-  // [num_half] <tau / R> / V'
-  // TODO(jons): figure out what this really is
+  // [num_half] <tau / R> / V', which is the flux-surface average of 1/R;
+  // written to wout as over_r
   Eigen::VectorXd overr;
 
   // plasma beta on magnetic axis
@@ -29272,6 +29519,7 @@ OutputQuantities ComputeOutputQuantities(
     const FlowControl& fc, const VmecConstants& constants,
     const FourierBasisFastPoloidal& t, const HandoverStorage& h,
     const std::string& mgrid_mode,
+    const std::vector<std::string>& coil_group_names,
     const std::vector<std::unique_ptr<RadialPartitioning> >&
         radial_partitioning,
     const std::vector<std::unique_ptr<FourierGeometry> >& decomposed_x,
@@ -29411,6 +29659,7 @@ WOutFileContents ComputeWOutFileContents(
     const VmecINDATA& indata, const Sizes& s, const FourierBasisFastPoloidal& t,
     const FlowControl& fc, const VmecConstants& constants,
     const HandoverStorage& handover_storage, const std::string& mgrid_mode,
+    const std::vector<std::string>& coil_group_names,
     VmecInternalResults& m_vmec_internal_results, const BSubSHalf& bsubs_half,
     const BSubSFull& bsubs_full, const MercierFileContents& mercier,
     const JxBOutFileContents& jxbout,
@@ -30802,6 +31051,7 @@ vmecpp::OutputQuantities vmecpp::ComputeOutputQuantities(
     const FlowControl& fc, const VmecConstants& constants,
     const FourierBasisFastPoloidal& t, const HandoverStorage& h,
     const std::string& mgrid_mode,
+    const std::vector<std::string>& coil_group_names,
     const std::vector<std::unique_ptr<RadialPartitioning>>& radial_partitioning,
     const std::vector<std::unique_ptr<FourierGeometry>>& decomposed_x,
     const std::vector<std::unique_ptr<IdealMhdModel>>& models_from_threads,
@@ -30973,7 +31223,7 @@ vmecpp::OutputQuantities vmecpp::ComputeOutputQuantities(
     // and setup a stand-alone test case to figure out what went wrong
     // and how to prevent that crash in the future.
     output_quantities.wout = ComputeWOutFileContents(
-        indata, s, t, fc, constants, h, mgrid_mode,
+        indata, s, t, fc, constants, h, mgrid_mode, coil_group_names,
         /*m_vmec_internal_results=*/output_quantities.vmec_internal_results,
         output_quantities.bsubs_half, output_quantities.bsubs_full,
         output_quantities.mercier, output_quantities.jxbout,
@@ -31500,10 +31750,12 @@ vmecpp::SymmetryDecomposedCovariantB vmecpp::DecomposeCovariantBBySymmetry(
     // bs_a(v,u) = .5*( bs(v,u) + bs(-v,-u) )     ! * COS(mu - nv)
     for (int jF = 0; jF < vmec_internal_results.num_full; ++jF) {
       for (int kl = 0; kl < vmec_internal_results.nZnT_reduced; ++kl) {
-        const int source_index = jF * s.nZnT + kl;
-
         const int k = kl / s.nThetaReduced;
         const int l = kl % s.nThetaReduced;
+
+        // bsubs_full is stored in the full (nThetaEff) poloidal layout, so the
+        // within-surface offset has to use nThetaEven, as for bsubu below.
+        const int source_index = jF * s.nZnT + (k * s.nThetaEven + l);
 
         const int l_reversed = (s.nThetaEven - l) % s.nThetaEven;
         const int k_reversed = (s.nZeta - k) % s.nZeta;
@@ -31610,6 +31862,17 @@ vmecpp::CovariantBDerivatives vmecpp::LowPassFilterCovariantB(
   if (s.lasym) {
     bsubu_filtered_a.resize(m_vmec_internal_results.num_half * s.nZnT);
     bsubv_filtered_a.resize(m_vmec_internal_results.num_half * s.nZnT);
+  }
+
+  // d(B_v)/d(theta) and d(B_u)/d(zeta), accumulated per parity in the reduced
+  // (nThetaReduced) poloidal layout and extended to the full range below.
+  std::vector<double> bsubvu_s(m_vmec_internal_results.num_half * s.nZnT, 0.0);
+  std::vector<double> bsubuv_s(m_vmec_internal_results.num_half * s.nZnT, 0.0);
+  std::vector<double> bsubvu_a;
+  std::vector<double> bsubuv_a;
+  if (s.lasym) {
+    bsubvu_a.resize(m_vmec_internal_results.num_half * s.nZnT);
+    bsubuv_a.resize(m_vmec_internal_results.num_half * s.nZnT);
   }
 
   // FOURIER LOW-PASS FILTER bsubs
@@ -31789,13 +32052,11 @@ vmecpp::CovariantBDerivatives vmecpp::LowPassFilterCovariantB(
 
             const double tsinm1 = t.sinmum[idx_ml] * t.cosnv[idx_kn];
             const double tsinm2 = t.cosmum[idx_ml] * t.sinnv[idx_kn];
-            covariant_b_derivatives.bsubvu(target_index) +=
-                tsinm1 * bsubvmn1 + tsinm2 * bsubvmn2;
+            bsubvu_s[target_index] += tsinm1 * bsubvmn1 + tsinm2 * bsubvmn2;
 
             const double tsinn1 = t.cosmu[idx_ml] * t.sinnvn[idx_kn];
             const double tsinn2 = t.sinmu[idx_ml] * t.cosnvn[idx_kn];
-            covariant_b_derivatives.bsubuv(target_index) +=
-                tsinn1 * bsubumn1 + tsinn2 * bsubumn2;
+            bsubuv_s[target_index] += tsinn1 * bsubumn1 + tsinn2 * bsubumn2;
 
             if (s.lasym) {
               const double tsin1 = t.sinmu[idx_ml] * t.cosnv[idx_kn];
@@ -31807,13 +32068,11 @@ vmecpp::CovariantBDerivatives vmecpp::LowPassFilterCovariantB(
 
               const double tcosm1 = t.cosmum[idx_ml] * t.cosnv[idx_kn];
               const double tcosm2 = t.sinmum[idx_ml] * t.sinnv[idx_kn];
-              covariant_b_derivatives.bsubvu(target_index) +=
-                  tcosm1 * bsubvmn3 + tcosm2 * bsubvmn4;
+              bsubvu_a[target_index] += tcosm1 * bsubvmn3 + tcosm2 * bsubvmn4;
 
               const double tcosn1 = t.sinmu[idx_ml] * t.sinnvn[idx_kn];
               const double tcosn2 = t.cosmu[idx_ml] * t.cosnvn[idx_kn];
-              covariant_b_derivatives.bsubuv(target_index) +=
-                  tcosn1 * bsubumn3 + tcosn2 * bsubumn4;
+              bsubuv_a[target_index] += tcosn1 * bsubumn3 + tcosn2 * bsubumn4;
             }  // lasym
           }  // l
         }  // k
@@ -31863,6 +32122,50 @@ vmecpp::CovariantBDerivatives vmecpp::LowPassFilterCovariantB(
         const int idx_kl = jH * s.nZnT + kl;
         m_vmec_internal_results.bsubu(idx_kl) = bsubu_filtered_s[idx_kl];
         m_vmec_internal_results.bsubv(idx_kl) = bsubv_filtered_s[idx_kl];
+      }  // kl
+    }  // jH
+  }
+
+  // EXTEND bsubvu, bsubuv TO NTHETA3 MESH
+  // The stellarator-symmetric parts of d(B_v)/d(theta) and d(B_u)/d(zeta) are
+  // odd under (theta, zeta) -> (-theta, -zeta), the non-symmetric parts are
+  // even, so the reflected half carries -s + a.
+  if (s.lasym) {
+    const int nZnT_reduced = m_vmec_internal_results.nZnT_reduced;
+    for (int jH = 0; jH < m_vmec_internal_results.num_half; ++jH) {
+      for (int k = 0; k < s.nZeta; ++k) {
+        const int k_reversed = (s.nZeta - k) % s.nZeta;
+        for (int l = 0; l < s.nThetaReduced; ++l) {
+          const int source_index =
+              jH * nZnT_reduced + (k * s.nThetaReduced + l);
+          const int target_index = jH * s.nZnT + (k * s.nThetaEff + l);
+
+          covariant_b_derivatives.bsubvu(target_index) =
+              bsubvu_s[source_index] + bsubvu_a[source_index];
+          covariant_b_derivatives.bsubuv(target_index) =
+              bsubuv_s[source_index] + bsubuv_a[source_index];
+        }  // l
+        for (int l = s.nThetaReduced; l < s.nThetaEven; ++l) {
+          const int l_reversed = (s.nThetaEven - l) % s.nThetaEven;
+          const int source_index_reversed =
+              jH * nZnT_reduced + (k_reversed * s.nThetaReduced + l_reversed);
+          const int target_index = jH * s.nZnT + (k * s.nThetaEff + l);
+
+          covariant_b_derivatives.bsubvu(target_index) =
+              -bsubvu_s[source_index_reversed] +
+              bsubvu_a[source_index_reversed];
+          covariant_b_derivatives.bsubuv(target_index) =
+              -bsubuv_s[source_index_reversed] +
+              bsubuv_a[source_index_reversed];
+        }  // l
+      }  // k
+    }  // jH
+  } else {
+    for (int jH = 0; jH < m_vmec_internal_results.num_half; ++jH) {
+      for (int kl = 0; kl < s.nZnT; ++kl) {
+        const int idx_kl = jH * s.nZnT + kl;
+        covariant_b_derivatives.bsubvu(idx_kl) = bsubvu_s[idx_kl];
+        covariant_b_derivatives.bsubuv(idx_kl) = bsubuv_s[idx_kl];
       }  // kl
     }  // jH
   }
@@ -32451,7 +32754,12 @@ vmecpp::ComputeIntermediateMercierQuantities(
       const double gpp_numerator = mercier_intermediate.gsqrt_full(index_full) *
                                    mercier_intermediate.gsqrt_full(index_full);
 
-      // TODO(jons): figure out what this really is
+      // The denominator is |e_theta x e_zeta|^2. In the cylindrical frame
+      // e_theta x e_zeta = -R z_theta rhat + (r_zeta z_theta - r_theta z_zeta)
+      // phihat + R r_theta zhat, so its square is R^2 g_theta,theta plus the
+      // square of the toroidal component below. With grad(s) = (e_theta x
+      // e_zeta) / sqrt(g), the quotient formed here is sqrt(g)^2 /
+      // |e_theta x e_zeta|^2 = 1 / |grad(s)|^2.
       const double gpp_denominator_ingredient = rtf * zzf - rzf * ztf;
       const double gpp_denominator =
           gtt * r1f * r1f +
@@ -33009,7 +33317,9 @@ vmecpp::ComputeIntermediateThreed1GeometricMagneticQuantities(
     const double zv = vmec_internal_results.zv_e(lcfs_kl) +
                       vmec_internal_results.zv_o(lcfs_kl);
 
-    // TODO(jons): figure out what this really is
+    // toroidal component of e_theta x e_zeta; together with the R^2 g_uu
+    // term below, the square root is |e_theta x e_zeta|, the area element of
+    // the boundary surface.
     const double rv_zu_minus_zv_ru = rv * zu0 - zv * ru0;
 
     intermediate.surf_area[kl] =
@@ -33052,7 +33362,11 @@ vmecpp::ComputeIntermediateThreed1GeometricMagneticQuantities(
     for (int kl = 0; kl < s.nZnT; ++kl) {
       const int index_half = jH * s.nZnT + kl;
 
-      // TODO(jons): assumes B_tor ~ 1/R ???
+      // In the vacuum region R B_phi is constant, so the vacuum toroidal
+      // field is rBtor / R. That is exact for an axisymmetric external field
+      // and an approximation for a stellarator coil set; it enters the
+      // Shafranov integrals below, which are a diagnostic. Fortran eqfor.f90
+      // does the same.
       intermediate.btor_vac[kl] =
           handover_storage.rBtor / vmec_internal_results.r12(index_half);
 
@@ -33175,7 +33489,9 @@ vmecpp::ComputeIntermediateThreed1GeometricMagneticQuantities(
     intermediate.s2 += jxbout.jperp2[jF] * two_dVds_full;
   }  // jH
 
-  // TODO(jons): figure out what fac is and assign a better name
+  // Poloidal flux increment per radial step: chi' = iota * phi', so
+  // r3v = fac * phipH * iotaH accumulates into psi below. The 2 pi is the
+  // toroidal angle period and the Jacobian sign fixes the orientation.
   intermediate.fac =
       2.0 * M_PI * fc.deltaS * vmec_internal_results.sign_of_jacobian;
   intermediate.r3v = VectorXd::Zero(fc.ns - 1);
@@ -33294,29 +33610,29 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
         vmec_internal_results.z_e(lcfs_kl) + vmec_internal_results.z_o(lcfs_kl);
     result.rmax_surf = std::max(result.rmax_surf, r);
     result.rmin_surf = std::min(result.rmin_surf, r);
-    result.zmax_surf = std::max(result.zmax_surf, z);
+    result.zmax_surf = std::max(result.zmax_surf, std::abs(z));
   }  // kl
 
-  result.bmin = RowMatrixXd::Ones(fc.ns - 1, s.nThetaReduced) * DBL_MAX;
-  result.bmax = RowMatrixXd::Zero(fc.ns - 1, s.nThetaReduced);
+  // One column per stored poloidal point: the reduced range for a
+  // stellarator-symmetric run, the full range for lasym.
+  result.bmin = RowMatrixXd::Ones(fc.ns - 1, s.nThetaEff) * DBL_MAX;
+  result.bmax = RowMatrixXd::Zero(fc.ns - 1, s.nThetaEff);
 
   for (int jH = 0; jH < fc.ns - 1; ++jH) {
     for (int k = 0; k < s.nZeta; ++k) {
-      for (int l = 0; l < s.nThetaReduced; ++l) {
-        // total_pressure is stored with the full nThetaEff within-surface
-        // stride; bmax/bmin only need the reduced poloidal range.
+      for (int l = 0; l < s.nThetaEff; ++l) {
         const int kl = k * s.nThetaEff + l;
         const int index_half = jH * s.nZnT + kl;
 
         const double mod_b =
             std::sqrt(2.0 * (vmec_internal_results.total_pressure(index_half) -
                              vmec_internal_results.presH[jH]));
-        result.bmax(jH * s.nThetaReduced + l) =
-            std::max(result.bmax(jH * s.nThetaReduced + l), mod_b);
-        result.bmin(jH * s.nThetaReduced + l) =
-            std::min(result.bmin(jH * s.nThetaReduced + l), mod_b);
-      }  // k
-    }  // l
+        result.bmax(jH * s.nThetaEff + l) =
+            std::max(result.bmax(jH * s.nThetaEff + l), mod_b);
+        result.bmin(jH * s.nThetaEff + l) =
+            std::min(result.bmin(jH * s.nThetaEff + l), mod_b);
+      }  // l
+    }  // k
   }  // jH
 
   // Compute Waist thickness and height in \f$\varphi = 0, \pi\f$ symmetry
@@ -33338,8 +33654,10 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
     const double r_outboard = vmec_internal_results.r_e(index_outboard) +
                               vmec_internal_results.r_o(index_outboard);
 
+    // theta = pi sits at l = nThetaReduced - 1 in both poloidal layouts; the
+    // within-surface stride is nThetaEff, as for the outboard point above.
     const int index_inboard =
-        ((fc.ns - 1) * s.nZeta + k) * s.nThetaReduced + (s.nThetaReduced - 1);
+        ((fc.ns - 1) * s.nZeta + k) * s.nThetaEff + (s.nThetaReduced - 1);
     const double r_inboard = vmec_internal_results.r_e(index_inboard) +
                              vmec_internal_results.r_o(index_inboard);
 
@@ -33363,7 +33681,9 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
   result.betator = intermediate.sump20 / intermediate.sumbtor;
   result.VolAvgB = std::sqrt(std::abs(intermediate.sumbtot / result.volume_p));
 
-  // TODO(jons): which ion is assumed here ?
+  // A 1 keV proton at its thermal speed: sqrt(m_p k T) / e = 3.23e-3 T m,
+  // which is the constant to two digits. Fortran eqfor.f90 carries the same
+  // number without naming the species.
   result.IonLarmor = 3.2e-3 / result.VolAvgB;
 
   if (intermediate.s2 != 0.0) {
@@ -33391,8 +33711,10 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
   for (int jF = 1; jF < fc.ns; ++jF) {
     double jperp2 = DBL_EPSILON;
     if (jxbout.jperp2[jF] != 0.0) {
-      // TODO(jons): Actually, in-place overwrite within Fortran VMEC.
-      // -> need to do in-place overwrite for follow-up quanties?
+      // Fortran VMEC substitutes the epsilon into jperp2 in place. Nothing
+      // computed after this point reads jxbout.jperp2 again, so the local
+      // copy is equivalent for every consumer except the value written to the
+      // jxbout output, which stays 0 here where Fortran would write epsilon.
       jperp2 = jxbout.jperp2[jF];
     }
 
@@ -33435,9 +33757,13 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
       // double zxmax = 0.0;
       // double zxmin = 0.0;
 
-      // Theta = 0 to pi in upper half of X-Z plane
-      // TODO(jons): why second loop over toroidal offset ?
-      for (int icount = 0; icount < 2; ++icount) {
+      // Under stellarator symmetry only theta in [0, pi] is stored, and the
+      // second pass takes the reflected plane 2 pi - zeta with Z -> -Z to
+      // supply the other half of the cross-section. A lasym run stores the
+      // complete contour, which is scanned in a single pass.
+      const int num_passes = s.lasym ? 1 : 2;
+      const int num_theta = s.lasym ? s.nThetaEff : s.nThetaReduced;
+      for (int icount = 0; icount < num_passes; ++icount) {
         int k1 = k;
         int t1 = 1;
         if (icount == 1) {
@@ -33446,7 +33772,7 @@ vmecpp::ComputeThreed1GeometricMagneticQuantities(
           t1 = -1;
         }
 
-        for (int l = 0; l < s.nThetaReduced; ++l) {
+        for (int l = 0; l < num_theta; ++l) {
           const int l_off = (jF * s.nZeta + k1) * s.nThetaEff + l;
 
           const double yr1u = vmec_internal_results.r_e(l_off) +
@@ -33602,7 +33928,10 @@ vmecpp::Threed1Betas vmecpp::ComputeThreed1Betas(
   result.betapol = threed1_geomag.betapol;
   result.betator = threed1_geomag.betator;
 
-  // TODO(jons): should this maybe be bsubvvac ?
+  // rBtor, not bSubVVac: the two are the plasma-side and vacuum-side
+  // estimates of the same R B_phi at the boundary, and the solver already
+  // requires them to agree in sign. Only rBtor exists for a fixed-boundary
+  // run, where nothing fills bSubVVac.
   result.rbtor = handover_storage.rBtor;
   result.betaxis = threed1_first_table_intermediate.beta_axis;
   result.betstr =
@@ -33740,6 +34069,7 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
     const VmecINDATA& indata, const Sizes& s, const FourierBasisFastPoloidal& t,
     const FlowControl& fc, const VmecConstants& constants,
     const HandoverStorage& handover_storage, const std::string& mgrid_mode,
+    const std::vector<std::string>& coil_group_names,
     VmecInternalResults& m_vmec_internal_results, const BSubSHalf& bsubs_half,
     const BSubSFull& bsubs_full, const MercierFileContents& mercier,
     const JxBOutFileContents& jxbout,
@@ -33820,8 +34150,8 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   wout.ns = fc.ns;
   wout.ftolv = fc.ftolv;
 
-  // TODO(jons): Technically, this is not an input but an output (should go into
-  // output data section).
+  // niter is an output rather than an input echo. It stays in this group
+  // because the wout layout is fixed by what Fortran VMEC writes.
   wout.niter = iter2;
 
   wout.lfreeb = indata.lfreeb;
@@ -33986,7 +34316,8 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
     }
   }
 
-  // TODO(jons): curlabel: the mgrid coil-group names are not read back yet
+  // coil group names, one per external current, as read from the mgrid file
+  wout.curlabel = coil_group_names;
 
   // -------------------
   // mode numbers for Fourier coefficient arrays below
@@ -36955,15 +37286,6 @@ Vmec::Vmec(const VmecINDATA& indata, std::optional<int> max_threads,
     h_.vacuum_b_r.setZero(s_.nZnT);
     h_.vacuum_b_phi.setZero(s_.nZnT);
     h_.vacuum_b_z.setZero(s_.nZnT);
-
-    // TODO(jons): move this check to better-suited place
-    if (indata_.free_boundary_method == FreeBoundaryMethod::ONLY_COILS &&
-        (indata_.curtor != 0.0 || indata_.pres_scale != 0.0)) {
-      throw std::invalid_argument(
-          absl::StrCat("curtor and pres_scale must be zero when using "
-                       "'only_coils' free boundary method, but were ",
-                       indata_.curtor, " and ", indata_.pres_scale));
-    }  // check that cutor==0 and pres_scale==0 for only_coils
   }
 }
 
@@ -37189,8 +37511,8 @@ absl::StatusOr<bool> Vmec::run(const VmecCheckpoint& checkpoint,
   // (for creating the output file, use WriteOutputFile())
   output_quantities_ = vmecpp::ComputeOutputQuantities(
       kSignOfJacobian, indata_, s_, fc_, constants_, t_, h_, mgrid_.mgrid_mode,
-      r_, decomposed_x_, m_, p_, checkpoint, vacuum_pressure_state_, status_,
-      iter2_);
+      mgrid_.coil_group_names, r_, decomposed_x_, m_, p_, checkpoint,
+      vacuum_pressure_state_, status_, iter2_);
 
   {
     const auto& w = output_quantities_.wout;
@@ -37475,13 +37797,17 @@ bool Vmec::InitializeRadial(
           // free-boundary hot restart: use all flux surfaces from initial state
           decomposed_x_[thread_id]->InitFromState(
               t_, initial_state->wout.rmnc, initial_state->wout.zmns,
-              initial_state->wout.lmns_full, *p_[thread_id], constants_);
+              initial_state->wout.lmns_full, initial_state->wout.rmns,
+              initial_state->wout.zmnc, initial_state->wout.lmnc_full,
+              *p_[thread_id], constants_);
         } else {
           // fixed-boundary hot restart: use inner flux surfaces from initial
           // state, and LCFS geometry from Boundaries (from INDATA)
           decomposed_x_[thread_id]->InitFromState(
               t_, initial_state->wout.rmnc, initial_state->wout.zmns,
-              initial_state->wout.lmns_full, *p_[thread_id], constants_, &b_);
+              initial_state->wout.lmns_full, initial_state->wout.rmns,
+              initial_state->wout.zmnc, initial_state->wout.lmnc_full,
+              *p_[thread_id], constants_, &b_);
         }
       }
     } else {
