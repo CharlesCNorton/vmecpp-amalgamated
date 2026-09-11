@@ -81,12 +81,13 @@ python amalgamate.py \
 
 Checked against a conventional multi-file build of the same sources: upstream's
 own CMake build at the same commit, configured with `-DVMECPP_USE_FFTX=OFF` so
-both binaries take the partial-DFT path, both compiled by GCC 13.3 on Ubuntu
-24.04 against the pinned dependency versions. Every case in upstream's
+both binaries take the partial-DFT path and `-DVMECPP_HWCAPS_DISPATCH=OFF` so
+the reference loads its baseline x86-64 core, both compiled by GCC 13.3 on
+Ubuntu 24.04 against the pinned dependency versions. Every case in upstream's
 `test_data` was run single-threaded by both binaries and the resulting HDF5
 files compared dataset by dataset with `tools/compare_outputs.py`.
 
-All 20 cases came out bit-for-bit identical, 438 datasets each and 442 for the
+All 20 cases came out bit-for-bit identical, 454 datasets each and 458 for the
 five `lasym` cases. They cover fixed boundary (`solovev`, `solovev_analytical`,
 `solovev_no_axis`, `circular_tokamak`, `cma`, `near_axis_iota_nfp4`,
 `li383_low_res`, `cth_like_fixed_bdy`, `cth_like_fixed_bdy_iota`,
@@ -99,7 +100,7 @@ constrained-iota and constrained-current profile modes, spline-parameterized
 pressure, multigrid `ns` sequences, the guessed magnetic axis, and the
 free-boundary Nestor and abscab paths.
 
-A Clang 18 build of the same file reproduces the GCC results bit-for-bit on all
+A Clang 21 build of the same file reproduces the GCC results bit-for-bit on all
 20 cases.
 
 Single-threaded runs are deterministic. With multiple threads, OpenMP reductions

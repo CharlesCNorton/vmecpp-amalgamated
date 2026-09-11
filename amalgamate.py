@@ -68,6 +68,8 @@ TUS = [
     "vmecpp/vmec/fourier_forces/fourier_forces.cc",
     "vmecpp/vmec/fourier_geometry/fourier_geometry.cc",
     "vmecpp/vmec/fourier_velocity/fourier_velocity.cc",
+    "vmecpp/vmec/geometry/geometry.cc",
+    "vmecpp/vmec/geometry/vmec_geometry.cc",
     "vmecpp/vmec/handover_storage/handover_storage.cc",
     "vmecpp/vmec/ideal_mhd_model/dft_toroidal.cc",
     "vmecpp/vmec/ideal_mhd_model/fft_toroidal.cc",
