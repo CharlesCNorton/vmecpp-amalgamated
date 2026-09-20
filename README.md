@@ -5,6 +5,12 @@ merged into one C++ translation unit, `vmecpp_amalgamated.cc`. The sources are
 VMEC++'s own rather than a reimplementation, so the binary solves the same
 equilibria and writes the same output.
 
+`vmecpp_amalgamated.min.cc` is the same program with comments and indentation
+removed and the per-file SPDX and copyright headers replaced by a single notice,
+around 30% fewer tokens, for reading the whole solver in one pass under a context
+budget. It keeps the `// source:` and `// header:` markers, so any region maps
+back to the commented layer for the prose on that routine.
+
 This is an unofficial redistribution and is not affiliated with or endorsed by
 Proxima Fusion.
 
@@ -32,6 +38,8 @@ are not included.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/vmecpp input.json [n_threads]    # writes input.out.h5
+
+cmake --build build --target vmecpp_min  # the stripped layer, same program
 ```
 
 The provided `CMakeLists.txt` fetches the dependencies VMEC++ pins (Eigen 5.0.1,
@@ -74,8 +82,14 @@ git -C abscab-cpp checkout 5cfa473b90aab06d7f70d986da0c46c46c1ebe9c  # v1.0.3
 python amalgamate.py \
     --cpp-root vmecpp/src/vmecpp/cpp \
     --abscab-root abscab-cpp \
-    --out vmecpp_amalgamated.cc
+    --out vmecpp_amalgamated.cc \
+    --min-out vmecpp_amalgamated.min.cc
 ```
+
+`--min-out` writes the stripped layer from the same assembled text. Its comment
+removal scans string and character literals, so a `//` or `/*` inside one
+survives; a block comment becomes one space, which cannot weld two tokens
+together, and the trailing backslash of a macro continuation is kept.
 
 ## Verification
 
@@ -102,6 +116,13 @@ free-boundary Nestor and abscab paths.
 
 A Clang 21 build of the same file reproduces the GCC results bit-for-bit on all
 20 cases.
+
+The stripped layer goes through the same comparison under both GCC 13.3 and
+Clang 21, and is bit-for-bit identical to the reference on all 20 cases with
+each. It is also checked structurally: `g++ -E` over both layers yields token
+streams of equal length that agree at every position but the `__FILE__` and
+`__LINE__` values the `CHECK` and `LOG` expansions embed, which name the file
+being compiled and the line it sits on.
 
 Single-threaded runs are deterministic. With multiple threads, OpenMP reductions
 sum in nondeterministic order, so the last bits can vary between runs, as in

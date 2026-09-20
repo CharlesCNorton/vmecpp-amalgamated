@@ -10,11 +10,18 @@ holds the declarations and abscab.cc the definitions, so both are inlined.
 The FFTX-accelerated transform path (VMECPP_USE_FFTX) is dropped, leaving the
 partial-DFT routines VMEC++ falls back to when FFTX is off.
 
+--min-out additionally writes a presentation-stripped layer of the same program:
+comments and indentation removed and the per-file SPDX and copyright headers
+replaced by a single notice, for reading the whole repository in one pass under a
+token budget. The source/header markers are kept so a region maps back to the
+commented layer.
+
 Usage:
   python amalgamate.py \
       --cpp-root   path/to/vmecpp/src/vmecpp/cpp \
       --abscab-root path/to/abscab-cpp \
-      --out        vmecpp_amalgamated.cc
+      --out        vmecpp_amalgamated.cc \
+      --min-out    vmecpp_amalgamated.min.cc
 
 --abscab-root must contain abscab/abscab.hh and abscab/abscab.cc. Get the
 sources VMEC++ pins with:
@@ -29,6 +36,7 @@ import subprocess
 from pathlib import Path
 
 INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*([<"])([^>"]+)[>"]')
+MARKER_RE = re.compile(r'^//\s*(?:source|header):\s*\S+$')
 
 # Library TUs relative to the cpp root, mirroring the vmecpp_sources list in
 # upstream's CMakeLists; vmec_standalone (the sole main()) last.
@@ -176,6 +184,55 @@ def strip_fftx(text):
     return "\n".join(out)
 
 
+def strip_presentation(text):
+    """Remove comments and indentation, keeping the source/header markers.
+
+    String and character literals are scanned, so a // or /* inside one survives.
+    A block comment becomes one space, which cannot weld two tokens together; a
+    line comment leaves its newline, so nothing else moves onto another line.
+    Runs of blank lines collapse to one, and the trailing backslash of a macro
+    continuation is kept."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in '"\'':
+            j = i + 1
+            while j < n:
+                if text[j] == '\\':
+                    j += 2
+                    continue
+                if text[j] == c:
+                    j += 1
+                    break
+                if text[j] == '\n':
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+        elif text.startswith('//', i):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            comment = text[i:j].strip()
+            if MARKER_RE.match(comment):
+                out.append(comment)
+            i = j
+        elif text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            out.append(' ')
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    kept = []
+    for line in "".join(out).split("\n"):
+        line = line.strip()
+        if line or (kept and kept[-1]):
+            kept.append(line)
+    return "\n".join(kept).strip("\n") + "\n"
+
+
 def git(cpp, *args):
     try:
         return subprocess.run(["git", "-C", str(cpp), *args],
@@ -193,6 +250,8 @@ def main():
                     help="path containing abscab/abscab.{hh,cc}")
     ap.add_argument("--out", default="vmecpp_amalgamated.cc", type=Path,
                     help="output .cc path")
+    ap.add_argument("--min-out", default=None, type=Path,
+                    help="also write the presentation-stripped layer here")
     ap.add_argument("--provenance", default="",
                     help="provenance string for the banner; default uses git")
     args = ap.parse_args()
@@ -289,15 +348,57 @@ def main():
 // ============================================================================
 """
 
-    args.out.write_text(banner + "\n".join(chunks) + "\n", encoding="utf-8")
+    body = "\n".join(chunks)
+    args.out.write_text(banner + body + "\n", encoding="utf-8")
 
-    n_lines = (banner + "\n".join(chunks)).count("\n") + 1
+    if args.min_out:
+        min_banner = f"""// ============================================================================
+// VMEC++ - single-file C++ amalgamation, presentation-stripped layer
+//
+// The same program as {args.out.name}, with comments and indentation
+// removed and the per-file SPDX and copyright headers replaced by the single
+// notice below. Read this layer to take in the whole of VMEC++ at once; the
+// source: and header: markers are kept, so any region maps back to that file,
+// where the comments on its routines are.
+//
+// SPDX-License-Identifier: MIT AND Apache-2.0
+//
+// VMEC++ (github.com/proximafusion/vmecpp): MIT License, Copyright (c)
+// 2024-present Proxima Fusion GmbH. abscab
+// (github.com/jonathanschilling/abscab-cpp), the Biot-Savart routines the
+// free-boundary path uses: Apache License 2.0, Copyright (c) Jonathan
+// Schilling. See LICENSE, NOTICE and THIRD_PARTY_LICENSES/.
+//
+// Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
+//
+// Provenance: {prov}
+//
+// Scope matches {args.out.name} exactly: the whole solver, fixed and
+// free boundary, every profile parameterization, the complete output suite and
+// the standalone main(), less the FFTX/SPIRAL transform (VMECPP_USE_FFTX) and
+// the Enzyme autodiff translation units (VMECPP_ENABLE_ENZYME).
+//
+// Build:
+//   cmake --build build --target vmecpp_min
+//   ./build/vmecpp_min input.json [n_threads]   # writes input.out.h5
+// ============================================================================
+"""
+        args.min_out.write_text(min_banner + strip_presentation(body),
+                                encoding="utf-8")
+
+    n_lines = (banner + body).count("\n") + 1
     print(f"wrote {args.out}")
     print(f"  translation units merged : {n_tus}")
     print(f"  project headers inlined  : {len(emitted) - n_tus}")
     print(f"  output lines             : {n_lines}")
     print(f"  output size              : {args.out.stat().st_size / 1024:.0f} KiB")
     print(f"  abscab inlined           : {abscab_inlined}")
+    if args.min_out:
+        min_text = args.min_out.read_text(encoding="utf-8")
+        print(f"  stripped layer           : {args.min_out}")
+        print(f"    lines                  : {min_text.count(chr(10))}")
+        print(f"    size                   : {args.min_out.stat().st_size / 1024:.0f} KiB"
+              f"  ({args.min_out.stat().st_size / args.out.stat().st_size:.1%})")
     if unresolved:
         print(f"  UNRESOLVED includes ({len(unresolved)}):")
         for rel, name in unresolved:

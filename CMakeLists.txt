@@ -10,6 +10,10 @@
 #   ./build/vmecpp input.json [n_threads]      # writes input.out.h5
 #
 # The first configure builds abseil from source (a few minutes).
+#
+# The presentation-stripped layer builds the same program from
+# vmecpp_amalgamated.min.cc as target vmecpp_min, which is outside the default
+# build: cmake --build build --target vmecpp_min.
 
 cmake_minimum_required(VERSION 3.16)
 project(vmecpp_amalgamated CXX C)
@@ -84,20 +88,29 @@ FetchContent_Declare(absl
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(absl)
 
-add_executable(vmecpp vmecpp_amalgamated.cc)
+function(vmecpp_amalgamation_target name source)
+  add_executable(${name} ${ARGN} ${source})
 
-target_include_directories(vmecpp PRIVATE
-  ${HDF5_INCLUDE_DIRS} ${HDF5_CXX_INCLUDE_DIRS})
+  target_include_directories(${name} PRIVATE
+    ${HDF5_INCLUDE_DIRS} ${HDF5_CXX_INCLUDE_DIRS})
 
-# https://libeigen.gitlab.io/eigen/docs-3.3/TopicMultiThreading.html : VMEC++
-# multithreads at the outer loop level, not inside individual Eigen operations.
-target_compile_definitions(vmecpp PRIVATE EIGEN_DONT_PARALLELIZE)
+  # https://libeigen.gitlab.io/eigen/docs-3.3/TopicMultiThreading.html : VMEC++
+  # multithreads at the outer loop level, not inside individual Eigen operations.
+  target_compile_definitions(${name} PRIVATE EIGEN_DONT_PARALLELIZE)
 
-target_link_libraries(vmecpp PRIVATE
-  ${HDF5_CXX_LIBRARIES} ${HDF5_LIBRARIES}
-  ${NETCDF_LINK}
-  nlohmann_json::nlohmann_json
-  absl::algorithm absl::base absl::synchronization absl::strings
-  absl::str_format absl::log absl::string_view absl::check
-  absl::status absl::statusor
-  OpenMP::OpenMP_CXX)
+  target_link_libraries(${name} PRIVATE
+    ${HDF5_CXX_LIBRARIES} ${HDF5_LIBRARIES}
+    ${NETCDF_LINK}
+    nlohmann_json::nlohmann_json
+    absl::algorithm absl::base absl::synchronization absl::strings
+    absl::str_format absl::log absl::string_view absl::check
+    absl::status absl::statusor
+    OpenMP::OpenMP_CXX)
+endfunction()
+
+vmecpp_amalgamation_target(vmecpp vmecpp_amalgamated.cc)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vmecpp_amalgamated.min.cc")
+  vmecpp_amalgamation_target(vmecpp_min vmecpp_amalgamated.min.cc
+                             EXCLUDE_FROM_ALL)
+endif()

@@ -15,6 +15,9 @@ VMEC++  -  https://github.com/proximafusion/vmecpp
     transform (guarded by VMECPP_USE_FFTX), which leaves the partial-DFT path
     VMEC++ uses when FFTX is off, and the Enzyme autodiff translation units
     (guarded by VMECPP_ENABLE_ENZYME). No algorithmic changes were made.
+    vmecpp_amalgamated.min.cc holds the same sources with comments and
+    indentation removed; the per-file SPDX and copyright headers it drops are
+    restated in the single notice at its head.
 
 abscab  -  https://github.com/jonathanschilling/abscab-cpp
     Apache License, Version 2.0, Copyright (c) Jonathan Schilling.
