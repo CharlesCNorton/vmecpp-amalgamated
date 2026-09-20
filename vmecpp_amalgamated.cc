@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.4
+// Provenance: github.com/proximafusion/vmecpp v0.7.4-7-gb4313afc
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -16616,9 +16616,65 @@ void RegularizedIntegrals::updateAxisymmetric(const Eigen::VectorXd& bDotN) {
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <numbers>
 #include <vector>
 
 namespace vmecpp {
+
+namespace {
+
+// Logarithm of the growth of the homogeneous solutions of the T_l recurrence
+// over a forward pass, sqrt(B/A)^kL, above which the recurrence is run
+// backward instead; a forward pass amplifies the rounding of its inputs by at
+// most this factor, ten.
+constexpr double kMaxForwardLogGrowth = std::numbers::ln10;
+
+// The zero seed of a backward pass contaminates T_l by (A/B)^{(top - l)/2} of
+// T_top; the pass starts far enough above kL to bring that below 1e-17 at kL.
+constexpr double kMinSeedLogDecay = 17.0 * std::numbers::ln10;
+
+// T_l = int_{-1}^{1} t^l / sqrt(A t^2 + 2 d t + B) dt for l = 0, ..., kL at
+// tangential grid point kl from the three-term recurrence
+//   (l + 1) A T_{l+1} + (2 l + 1) d T_l + l B T_{l-1} = sqrtc2 - (-1)^l sqrta2
+// with T_0 given. The characteristic roots of the homogeneous recurrence are a
+// complex pair of modulus sqrt(B/A), so a forward pass amplifies the rounding
+// of T_0 and of the right-hand sides by sqrt(B/A)^l and is used while that
+// stays below exp(kMaxForwardLogGrowth); otherwise the recurrence runs
+// backward from a zero seed, whose contamination decays by sqrt(A/B) per step.
+void ComputeTl(double A, double B, double d, double sqrtc2, double sqrta2,
+               double T0, int kL, int kl, std::vector<Eigen::VectorXd>& m_T) {
+  const auto rhs = [sqrtc2, sqrta2](int l) {
+    return sqrtc2 + (l % 2 == 0 ? -sqrta2 : sqrta2);
+  };
+  m_T[0][kl] = T0;
+  const double log_ratio = std::log(B / A);
+  if (kL * log_ratio <= 2.0 * kMaxForwardLogGrowth) {
+    double T_prev = 0.0;  // T_{-1}
+    for (int l = 0; l < kL; ++l) {
+      const double T_next =
+          (rhs(l) - (2 * l + 1) * d * m_T[l][kl] - l * B * T_prev) /
+          ((l + 1) * A);
+      T_prev = m_T[l][kl];
+      m_T[l + 1][kl] = T_next;
+    }
+    return;
+  }
+  const int tail =
+      static_cast<int>(std::ceil(2.0 * kMinSeedLogDecay / log_ratio));
+  double T_hi = 0.0;   // T_{l+1}
+  double T_cur = 0.0;  // T_l
+  for (int l = kL + tail; l >= 1; --l) {
+    const double T_lo =
+        (rhs(l) - (2 * l + 1) * d * T_cur - (l + 1) * A * T_hi) / (l * B);
+    T_hi = T_cur;
+    T_cur = T_lo;
+    if (1 <= l - 1 && l - 1 <= kL) {
+      m_T[l - 1][kl] = T_lo;
+    }
+  }
+}
+
+}  // namespace
 
 SingularIntegrals::SingularIntegrals(const Sizes* s,
                                      const FourierBasisFastToroidal* fb,
@@ -16828,117 +16884,9 @@ void SingularIntegrals::prepareUpdate(
                            (sqrtam * sqrta2[kl] - am[kl] + d[kl])) /
                        sqrtam;
 
-    // Fill all Tlp[0..L] and Tlm[0..L] by picking the numerically stable
-    // direction of the three-term recurrence on a per-(+/-), per-kl basis.
-    //
-    // The characteristic roots of the homogeneous recurrence satisfy
-    //   A*r^2 + 2*d*r + B = 0  -> |r1 r2| = B/A.
-    // For T^+: (A, B) = (ap, am), so |r1 r2| = am/ap.
-    // For T^-: (A, B) = (am, ap), so |r1 r2| = ap/am.
-    // If B > A (at least one |r| > 1), forward iteration is unstable and
-    // backward (Miller's algorithm) is used instead; otherwise forward is fine.
-    //
-    // T^{\pm}_0 is analytic (above); T^{\pm}_{-1} = 0. Forward produces
-    // T_{l+1} from T_l and T_{l-1}; backward produces T_{l-1} from T_l and
-    // T_{l+1} via the same recurrence solved in reverse. For backward,
-    // iteration starts from a zero seed far above the required L; the result
-    // is then normalized to match the analytic T^{\pm}_0.
-    //
-    // rhs(l+1) = sqrtc2 + (-1)^{l+1}*sqrta2  (same for T^+ and T^-).
     const int kL = mf + nf;
-    // The spurious solution is damped by (A/B)^kTailExtra per pass.
-    // For the worst realistic ratio (A/B ~ 0.5) suppression is ~0.5^50 ~ 1e-16.
-    const int kTailExtra = 50;
-    const int kLtail = kL + kTailExtra;
-
-    // Only switch to backward when the forward spurious-mode growth
-    // (|r1 r2| = B/A) would actually exceed double precision over kL steps.
-    // Threshold: forward is considered stable as long as (B/A)^kL < 1e10,
-    // i.e. spurious amplitude stays within ~1e10 of the particular solution.
-    // Near-degenerate kl (|r1|~|r2|~1) fall in the forward branch, where
-    // zero-seed Miller is known to misconverge (spurious modes never damp).
-    // Formula: kL * ln(B/A) < ln(1e10) -> B/A < exp(ln(1e10)/kL).
-    constexpr double kLogGrowthThreshold = 10.0 * 2.30258509299;  // ln(1e10)
-    const double logRatioP =
-        (am[kl] > ap[kl] && ap[kl] > 0.0) ? std::log(am[kl] / ap[kl]) : 0.0;
-    const bool useBackwardP =
-        static_cast<double>(kL) * logRatioP > kLogGrowthThreshold;
-    const double logRatioM =
-        (ap[kl] > am[kl] && am[kl] > 0.0) ? std::log(ap[kl] / am[kl]) : 0.0;
-    const bool useBackwardM =
-        static_cast<double>(kL) * logRatioM > kLogGrowthThreshold;
-
-    // --- T^+: A = ap, B = am ---
-    Tlp[0][kl] = T0p;
-    if (useBackwardP) {
-      // forward unstable -> use backward recurrence.
-      double T_hi = 0.0;
-      double T_cur = 1.0e-300;
-      for (int l = kLtail; l >= 1; --l) {
-        const double rhs = sqrtc2[kl] + (l % 2 == 0 ? -1.0 : 1.0) * sqrta2[kl];
-        const double T_lo =
-            (rhs - (2 * l + 1) * d[kl] * T_cur - (l + 1) * ap[kl] * T_hi) /
-            (l * am[kl]);
-        T_hi = T_cur;
-        T_cur = T_lo;
-        if (l - 1 <= kL) {
-          Tlp[l - 1][kl] = T_lo;
-        }
-      }
-      const double scaleP = T0p / Tlp[0][kl];
-      for (int l = 0; l <= kL; ++l) {
-        Tlp[l][kl] *= scaleP;
-      }
-    } else {
-      // forward stable.
-      double T_prev = 0.0;  // T^+_{-1}
-      int sgn = 1;
-      for (int fl = 0; fl < kL; ++fl) {
-        sgn = -sgn;
-        const double rhs = sqrtc2[kl] + sgn * sqrta2[kl];
-        const double T_next =
-            (rhs - (2 * fl + 1) * d[kl] * Tlp[fl][kl] - fl * am[kl] * T_prev) /
-            (ap[kl] * (fl + 1));
-        T_prev = Tlp[fl][kl];
-        Tlp[fl + 1][kl] = T_next;
-      }
-    }
-
-    // --- T^-: A = am, B = ap ---
-    Tlm[0][kl] = T0m;
-    if (useBackwardM) {
-      // forward unstable -> use backward recurrence.
-      double T_hi = 0.0;
-      double T_cur = 1.0e-300;
-      for (int l = kLtail; l >= 1; --l) {
-        const double rhs = sqrtc2[kl] + (l % 2 == 0 ? -1.0 : 1.0) * sqrta2[kl];
-        const double T_lo =
-            (rhs - (2 * l + 1) * d[kl] * T_cur - (l + 1) * am[kl] * T_hi) /
-            (l * ap[kl]);
-        T_hi = T_cur;
-        T_cur = T_lo;
-        if (l - 1 <= kL) {
-          Tlm[l - 1][kl] = T_lo;
-        }
-      }
-      const double scaleM = T0m / Tlm[0][kl];
-      for (int l = 0; l <= kL; ++l) {
-        Tlm[l][kl] *= scaleM;
-      }
-    } else {
-      // forward stable.
-      double T_prev = 0.0;  // T^-_{-1}
-      int sgn = 1;
-      for (int fl = 0; fl < kL; ++fl) {
-        sgn = -sgn;
-        const double rhs = sqrtc2[kl] + sgn * sqrta2[kl];
-        const double T_next =
-            (rhs - (2 * fl + 1) * d[kl] * Tlm[fl][kl] - fl * ap[kl] * T_prev) /
-            (am[kl] * (fl + 1));
-        T_prev = Tlm[fl][kl];
-        Tlm[fl + 1][kl] = T_next;
-      }
-    }
+    ComputeTl(ap[kl], am[kl], d[kl], sqrtc2[kl], sqrta2[kl], T0p, kL, kl, Tlp);
+    ComputeTl(am[kl], ap[kl], d[kl], sqrtc2[kl], sqrta2[kl], T0m, kL, kl, Tlm);
   }  // kl
 }  // prepareUpdate
 
@@ -21367,6 +21315,9 @@ void ForcesToFourier3DAsymFastPoloidal(
 #ifndef VMECPP_VMEC_IDEAL_MHD_MODEL_LOCAL_FORCE_COMPOSITION_H_
 #define VMECPP_VMEC_IDEAL_MHD_MODEL_LOCAL_FORCE_COMPOSITION_H_
 
+#include <algorithm>
+#include <cmath>
+
 
 // ============================================================================
 // header: vmecpp/vmec/ideal_mhd_model/bco_kernel.h
@@ -22250,13 +22201,16 @@ namespace vmecpp {
 // exact Hessian-vector product. Covers the MHD force and the hybrid lambda
 // force; when with_constraint is set it also computes the spectral-condensation
 // constraint force (effective force, Fourier bandpass, assembly into the R/Z
-// force), holding the multiplier tcon frozen.
+// force) with its multiplier tcon recomputed from the geometry.
 //
 // Geometry layout (each block GeomStride doubles, index (jF-nsMinF1)*nZnT):
 //   r1_e r1_o z1_e z1_o ru_e ru_o zu_e zu_o rv_e rv_o zv_e zv_o lu_e lu_o lv_e
 //   lv_o
 // Force layout (each block ForceStride doubles): the 12 MHD densities then
-//   blmn_e blmn_o clmn_e clmn_o.
+//   blmn_e blmn_o clmn_e clmn_o. Block 20 is the ncurr==1 chi' profile
+//   (index jH-nsMinH, the rest of the block unused), differentiated alongside
+//   the force densities so its state derivative comes out of the same Enzyme
+//   pass; ncurr==0 does not populate it (chi' is a fixed input profile).
 struct LocalForceComposition {
   int nZnT;
   int geom_stride;   // doubles per geometry block (>= (nsMaxF1-nsMinF1)*nZnT)
@@ -22287,18 +22241,20 @@ struct LocalForceComposition {
   // Spectral-condensation constraint force. Enabled only when with_constraint
   // is set; then geometry blocks 16-19 hold rCon, zCon, ruFull, zuFull and
   // force blocks 16-19 receive frcon_e/o, fzcon_e/o. The bandpass uses the
-  // Fourier basis arrays and the tcon/faccon profiles. rCon0/zCon0 are
-  // recomputed in place from the live geometry (so they are differentiated);
-  // tcon is held frozen (see freeze_constraint_multiplier_).
+  // Fourier basis arrays and the faccon profile. rCon0/zCon0 and the
+  // multiplier tcon are recomputed in place from the live geometry, so both
+  // are differentiated; tcon needs ns and the ns-dependent scale
+  // tcon_multiplier of constraintForceMultiplier.
   bool with_constraint = false;
   bool lasym = false;
+  int ns = 0;
   int nsMaxF = 0;  // constraint RZ range upper bound
   int nZeta = 0, nThetaEven = 0, nThetaReduced = 0, mpol = 0, ntor = 0,
       nnyq2 = 0;
+  double tcon_multiplier = 0.0;
   const double* rCon0 = nullptr;
   const double* zCon0 = nullptr;
   const double* faccon = nullptr;
-  const double* tcon = nullptr;
   const double* sinmui = nullptr;
   const double* cosmui = nullptr;
   const double* cosnv = nullptr;
@@ -22307,8 +22263,25 @@ struct LocalForceComposition {
   const double* cosmu = nullptr;
 };
 
-// work must hold 15*nHalf + 30*nZnT plus the constraint scratch described
-// below, where nHalf=(nsMaxH-nsMinH)*nZnT.
+// Number of force blocks ComputeLocalForceDensity writes: the 12 MHD/lambda
+// densities, 4 constraint densities, and the ncurr==1 chi' block.
+inline constexpr int kLocalForceBlocks = 21;
+
+// Doubles of work that ComputeLocalForceDensity slices for composition c: the
+// half-grid fields and per-point scratch, plus the constraint scratch when
+// with_constraint is set.
+inline int LocalForceWorkSize(const LocalForceComposition& c) {
+  const int nHalf = c.nsMaxH - c.nsMinH;
+  int n = 15 * nHalf * c.nZnT + 30 * c.nZnT;
+  if (c.with_constraint) {
+    const int nFull = c.nsMaxFIncludingLcfs - c.nsMinF;
+    n += 4 * nFull * c.nZnT + 4 * (c.ntor + 1) + c.nZnT + c.nThetaReduced +
+         nFull + 2 * nHalf;
+  }
+  return n;
+}
+
+// work must hold LocalForceWorkSize(*c) doubles.
 inline void ComputeLocalForceDensity(const double* geom, double* work,
                                      double* force,
                                      const LocalForceComposition* c) {
@@ -22374,6 +22347,7 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
                         c->nsMinH, c->nsMaxH, gsqrt, guu, guv, gvv);
   ComputeBsupContra(lue, luo, lve, lvo, gsqrt, c->sqrtSH, c->lthreed, nZnT,
                     c->nsMinF1, c->nsMinH, c->nsMaxH, bsupu, bsupv);
+  double* chip_out = force + 20 * fS;
   for (int jH = c->nsMinH; jH < c->nsMaxH; ++jH) {
     // For a prescribed-current profile (ncurr==1), chi' is recomputed from the
     // geometry each step (constrained toroidal current), so differentiate it
@@ -22396,6 +22370,10 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
       if (avg_guu_gsqrt != 0.0) {
         chip = (c->currH[jH - c->nsMinH] - jvPlasma) / avg_guu_gsqrt;
       }
+      // Expose chi' as its own output block so a cotangent seeded there alone
+      // yields (dchi'/dx)^T through the same reverse pass as the force
+      // cotangent; ncurr==0 leaves this block untouched (chi' is prescribed).
+      chip_out[jH - c->nsMinH] = chip;
     }
     for (int kl = 0; kl < nZnT; ++kl) {
       const int ih = (jH - c->nsMinH) * nZnT + kl;
@@ -22531,7 +22509,60 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
     // exact HVP consistent with re-evaluating rzConIntoVolume each step.
     double* rCon0 = s;
     s += (c->nsMaxFIncludingLcfs - c->nsMinF) * nZnT;
-    double* zCon0 = s;  // last slice of the work buffer
+    double* zCon0 = s;
+    s += (c->nsMaxFIncludingLcfs - c->nsMinF) * nZnT;
+    // Constraint multiplier tcon from the geometry, as
+    // constraintForceMultiplier forms it: the even-parity radial preconditioner
+    // diagonals ard, azd of computePreconditioningMatrix, summed from both
+    // half-grid neighbours of each full-grid surface, over the surface averages
+    // of ruFull^2 and zuFull^2.
+    double* tcon = s;
+    s += c->nsMaxFIncludingLcfs - c->nsMinF;
+    double* ard_h = s;
+    s += c->nsMaxH - c->nsMinH;
+    double* azd_h = s;  // last slice of the work buffer
+    for (int jH = c->nsMinH; jH < c->nsMaxH; ++jH) {
+      double ar = 0.0;
+      double az = 0.0;
+      for (int kl = 0; kl < nZnT; ++kl) {
+        const int ih = (jH - c->nsMinH) * nZnT + kl;
+        // pFactor * r12 * totalPressure / tau * wInt, times (xu12 / deltaS)^2
+        const double pTau =
+            -4.0 * r12[ih] * tp[ih] / tau[ih] * c->wInt[kl % c->nThetaEff];
+        const double zu = zu12[ih] / c->deltaS;
+        const double ru = ru12[ih] / c->deltaS;
+        ar += pTau * zu * zu;
+        az += pTau * ru * ru;
+      }
+      ard_h[jH - c->nsMinH] = ar;
+      azd_h[jH - c->nsMinH] = az;
+    }
+    for (int i = 0; i < c->nsMaxFIncludingLcfs - c->nsMinF; ++i) {
+      tcon[i] = 0.0;
+    }
+    const double tcon_scale =
+        c->tcon_multiplier * 32.0 * c->deltaS * 32.0 * c->deltaS;
+    for (int jF = (c->nsMinF > 0 ? c->nsMinF : 1); jF < c->nsMaxF; ++jF) {
+      double arNorm = 0.0;
+      double azNorm = 0.0;
+      for (int kl = 0; kl < nZnT; ++kl) {
+        const int idx = (jF - c->nsMinF) * nZnT + kl;
+        const double w = c->wInt[kl % c->nThetaEff];
+        arNorm += ruFull[idx] * ruFull[idx] * w;
+        azNorm += zuFull[idx] * zuFull[idx] * w;
+      }
+      const double ard = ard_h[jF - 1 - c->nsMinH] +
+                         (jF < c->ns - 1 ? ard_h[jF - c->nsMinH] : 0.0);
+      const double azd = azd_h[jF - 1 - c->nsMinH] +
+                         (jF < c->ns - 1 ? azd_h[jF - c->nsMinH] : 0.0);
+      tcon[jF - c->nsMinF] =
+          std::min(std::fabs(ard / arNorm), std::fabs(azd / azNorm)) *
+          tcon_scale;
+    }
+    if (c->nsMaxFIncludingLcfs == c->ns) {
+      // The boundary surface carries half the weight of an interior one.
+      tcon[c->ns - 1 - c->nsMinF] = 0.5 * tcon[c->ns - 2 - c->nsMinF];
+    }
     const int lcfs = (c->nsMaxFIncludingLcfs - 1 - c->nsMinF) * nZnT;
     for (int jF = (c->nsMinF > 1 ? c->nsMinF : 1); jF < c->nsMaxFIncludingLcfs;
          ++jF) {
@@ -22546,7 +22577,7 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
                                     nZnT, c->nsMinF, c->nsMaxFIncludingLcfs,
                                     gConEff);
     ComputeDeAliasConstraintForce(
-        gConEff, c->faccon, c->tcon, c->sinmui, c->cosmui, c->cosnv, c->sinnv,
+        gConEff, c->faccon, tcon, c->sinmui, c->cosmui, c->cosnv, c->sinnv,
         c->sinmu, c->cosmu, c->nsMinF, c->nsMaxF, c->nZeta, c->nThetaEff,
         c->nThetaReduced, c->nThetaEven, c->mpol, c->ntor, c->nnyq2, c->lasym,
         gsc, gcs, gcc, gss, gConAsym, refl, gCon);
@@ -22782,6 +22813,9 @@ class IdealMhdModel {
   // Current working hypothesis: This is used to make the constraint force "look
   // similar" to the MHD forces for improved numerical stability.
   absl::Status constraintForceMultiplier();
+  // The ns-dependent scale of the constraint force multiplier, shared with the
+  // local force composition that recomputes tcon from the geometry.
+  double constraintMultiplierScale() const;
 
   // Computes the effective constraint force that actually enters the iterative
   // scheme.
@@ -22806,9 +22840,10 @@ class IdealMhdModel {
   // condensation constraint force) by one Enzyme forward pass, then apply the
   // linear forward transform and preconditioner decomposition to obtain the
   // decomposed force tangent in m_decomposed_hv. The constraint multiplier tcon
-  // is held frozen; freeze it in the raw force too
-  // (freeze_constraint_multiplier_) for an exactly consistent Jacobian. Used by
-  // the exact internal Newton-Krylov Hessian-vector product. This low-level
+  // is recomputed from the geometry inside the composition, as the raw force
+  // recomputes it from the state, so the product is the derivative of the
+  // force the iteration drives to zero. Used by the exact internal
+  // Newton-Krylov Hessian-vector product. This low-level
   // kernel does not differentiate the state-dependent LFORBAL replacement;
   // public callers must reject lforbal=true.
   void applyExactForceJacobian(const double* geomP, const double* dgeom,
@@ -22830,19 +22865,16 @@ class IdealMhdModel {
   // current state, to isolate composition bugs from the transform/tangent path.
   double composedForceResidual(const double* geomP, int geom_stride);
 
-  // Raw force-density tangent (20 blocks of (nsMaxFIncludingLcfs-nsMinF)*nZnT)
-  // from one Enzyme forward pass, no transform. For isolating the JVP from the
-  // spectral-transform wrapping.
+  // Raw force-density tangent (kLocalForceBlocks blocks of
+  // (nsMaxFIncludingLcfs-nsMinF)*nZnT; block 20 is chi' for ncurr==1, see
+  // local_force_composition.h) from one Enzyme forward pass, no transform. For
+  // isolating the JVP from the spectral-transform wrapping.
   void exactForceDensityTangent(const double* geomP, const double* dgeom,
                                 int geom_stride, double* dforce_out);
 
-  // Freeze/unfreeze the constraint-force multiplier tcon (see the member).
-  void setFreezeConstraintMultiplier(bool freeze) {
-    freeze_constraint_multiplier_ = freeze;
-  }
-
   // Reverse-mode force-density cotangent: J_g^T applied to the force-density
-  // cotangent force_bar (20 blocks of (nsMaxFIncludingLcfs-nsMinF)*nZnT),
+  // cotangent force_bar (kLocalForceBlocks blocks of
+  // (nsMaxFIncludingLcfs-nsMinF)*nZnT; block 20 is the chi' cotangent),
   // accumulated into geom_bar_out (20 blocks of geom_stride, zeroed by caller),
   // by one Enzyme reverse pass. The transpose of exactForceDensityTangent.
   void exactForceDensityCotangent(const double* geomP, const double* force_bar,
@@ -22868,6 +22900,16 @@ class IdealMhdModel {
                                         FourierGeometry& m_physical_scratch,
                                         FourierGeometry& m_decomposed_out,
                                         bool fix_m1_gauge);
+
+  // (dchi'/dx)^T chip_bar for ncurr==1, in the decomposed internal basis.
+  // chip_bar holds one entry per half surface (index jH-nsMinH, the space
+  // chipH occupies). Reuses the reverse-mode force-density kernel seeded on
+  // its chi' output block alone, and the geometry-side (B^T) half of
+  // applyExactForceJacobianTranspose, since chi' depends on the same geometry
+  // blocks (r1, ru, zu, lu, lv) the force densities do.
+  void chipStateVjp(const double* geomP, int geom_stride,
+                    const double* chip_bar, FourierGeometry& m_physical_scratch,
+                    FourierGeometry& m_decomposed_out);
 
   // Transposes of the spectral transforms, for the transposed exact Hessian.
   // dft_ForcesToFourierTranspose: (forcesToFourier)^T, decomposed-force coeff
@@ -23220,14 +23262,6 @@ class IdealMhdModel {
   // 0 -- no spectral condensation constraint force
   // 1 (default) -- full spectral condensation constraint force
   double tcon0;
-
-  // When true, constraintForceMultiplier reuses the existing tcon instead of
-  // recomputing it from the geometry. The exact Hessian-vector product freezes
-  // tcon (it depends on the preconditioner diagonal, not just the geometry), so
-  // freezing it in the raw force too keeps the force and its exact HVP a
-  // consistent function of the state -- the residual a Newton solver drives and
-  // the Jacobian it linearizes with then match.
-  bool freeze_constraint_multiplier_ = false;
 
   // [mnsize] minimum flux surface index for which to apply radial
   // preconditioner for R and Z
@@ -28331,24 +28365,21 @@ void IdealMhdModel::computePreconditioningMatrix(
  * Compute constraint force multiplier profile.
  * Note that this needs to have the radial preconditioner updated.
  */
-absl::Status IdealMhdModel::constraintForceMultiplier() {
-  // Freeze: reuse the existing tcon so the raw force is a function of the state
-  // alone, matching the exact HVP (which freezes tcon). Requires a prior
-  // unfrozen evaluation to have populated tcon.
-  if (freeze_constraint_multiplier_) {
-    return absl::OkStatus();
-  }
-  // tcon
-
+double IdealMhdModel::constraintMultiplierScale() const {
   // TODO(jons): some parabola in ns,
   // but why these specific values of the parameters ?
-  double tcon_multiplier =
+  const double tcon_multiplier =
       tcon0 * (1.0 + m_fc_.ns * (1.0 / 60.0 + m_fc_.ns / (200.0 * 120.0)));
 
   // Fortran bcovar.f90: tcon_mul / (4 * r0scale**2)**2, undoing the scaling of
   // ard and azd (2*r0scale**2) and of cos**2 in alias (4*r0scale**2). r0scale
   // is 1 here, so the divisor is 16.
-  tcon_multiplier /= (4.0 * 4.0);
+  return tcon_multiplier / (4.0 * 4.0);
+}
+
+absl::Status IdealMhdModel::constraintForceMultiplier() {
+  // tcon
+  const double tcon_multiplier = constraintMultiplierScale();
 
   // compute constraint force multiplier profile on forces full-grid except axis
   int jMin = 0;
@@ -28537,7 +28568,8 @@ LocalForceComposition IdealMhdModel::makeLocalForceComposition(
   comp.rCon0 = rCon0.data();
   comp.zCon0 = zCon0.data();
   comp.faccon = faccon.data();
-  comp.tcon = tcon.data();
+  comp.ns = m_fc_.ns;
+  comp.tcon_multiplier = constraintMultiplierScale();
   comp.sinmui = t_.sinmui.data();
   comp.cosmui = t_.cosmui.data();
   comp.cosnv = t_.cosnv.data();
@@ -28556,14 +28588,11 @@ void IdealMhdModel::applyExactForceJacobian(const double* geomP,
   LocalForceComposition comp = makeLocalForceComposition(geom_stride);
   const int nForce = comp.force_stride;
 
-  const int nH = (r_.nsMaxH - r_.nsMinH) * s_.nZnT;
-  // work holds the half-grid and per-point scratch plus the constraint scratch.
-  const int nWork = 15 * nH + 30 * s_.nZnT + 4 * nForce + 4 * (s_.ntor + 1) +
-                    s_.nZnT + s_.nThetaReduced;
+  const int nWork = LocalForceWorkSize(comp);
   std::vector<double> work(nWork, 0.0);
   std::vector<double> dwork(nWork, 0.0);
-  std::vector<double> force(20 * nForce, 0.0);
-  std::vector<double> dforce(20 * nForce, 0.0);
+  std::vector<double> force(kLocalForceBlocks * nForce, 0.0);
+  std::vector<double> dforce(kLocalForceBlocks * nForce, 0.0);
 
   // single nonlinear forward pass: J_g . (T v)
   ExactForceDensityJvp(geomP, dgeom, work.data(), dwork.data(), force.data(),
@@ -28618,12 +28647,10 @@ void IdealMhdModel::exactForceDensityTangent(const double* geomP,
                                              double* dforce_out) {
   LocalForceComposition comp = makeLocalForceComposition(geom_stride);
   const int nForce = comp.force_stride;
-  const int nH = (r_.nsMaxH - r_.nsMinH) * s_.nZnT;
-  const int nWork = 15 * nH + 30 * s_.nZnT + 4 * nForce + 4 * (s_.ntor + 1) +
-                    s_.nZnT + s_.nThetaReduced;
+  const int nWork = LocalForceWorkSize(comp);
   std::vector<double> work(nWork, 0.0);
   std::vector<double> dwork(nWork, 0.0);
-  std::vector<double> force(20 * nForce, 0.0);
+  std::vector<double> force(kLocalForceBlocks * nForce, 0.0);
   ExactForceDensityJvp(geomP, dgeom, work.data(), dwork.data(), force.data(),
                        dforce_out, &comp);
 }
@@ -28634,15 +28661,13 @@ void IdealMhdModel::exactForceDensityCotangent(const double* geomP,
                                                double* geom_bar_out) {
   LocalForceComposition comp = makeLocalForceComposition(geom_stride);
   const int nForce = comp.force_stride;
-  const int nH = (r_.nsMaxH - r_.nsMinH) * s_.nZnT;
-  const int nWork = 15 * nH + 30 * s_.nZnT + 4 * nForce + 4 * (s_.ntor + 1) +
-                    s_.nZnT + s_.nThetaReduced;
+  const int nWork = LocalForceWorkSize(comp);
   std::vector<double> work(nWork, 0.0);
   std::vector<double> work_bar(nWork, 0.0);
-  std::vector<double> force(20 * nForce, 0.0);
+  std::vector<double> force(kLocalForceBlocks * nForce, 0.0);
   // force_bar is the output cotangent seed; Enzyme consumes (and may clobber)
   // the shadow, so pass a private copy. geom_bar_out is zeroed by the caller.
-  std::vector<double> fbar(force_bar, force_bar + 20 * nForce);
+  std::vector<double> fbar(force_bar, force_bar + kLocalForceBlocks * nForce);
   ExactForceDensityVjp(geomP, geom_bar_out, work.data(), work_bar.data(),
                        force.data(), fbar.data(), &comp);
 }
@@ -28992,10 +29017,16 @@ void IdealMhdModel::applyExactForceJacobianTranspose(
     dft_ForcesToFourierTranspose_2d_symm(m_physical_f);
   }
 
-  // Gather the force-density member cotangents into the 20-block flat layout.
-  std::vector<double> force_bar(20 * nForce, 0.0);
+  // Gather the force-density member cotangents into the flat block layout.
+  // The R/Z/constraint force members (armn/azmn/brmn/bzmn/frcon/fzcon and the
+  // 3d crmn/czmn) are only sized up to nsMaxF, one surface short of nForce's
+  // nsMaxFIncludingLcfs; only blmn/clmn span the full range. Bound the copy by
+  // src.size() so the LCFS slots for the shorter members are left at zero
+  // instead of reading past the end of the Eigen vector.
+  std::vector<double> force_bar(kLocalForceBlocks * nForce, 0.0);
   auto gather = [&](int b, const Eigen::VectorXd& src) {
-    for (int i = 0; i < nForce; ++i) force_bar[b * nForce + i] = src[i];
+    const int sz = std::min(nForce, static_cast<int>(src.size()));
+    for (int i = 0; i < sz; ++i) force_bar[b * nForce + i] = src[i];
   };
   gather(0, armn_e);
   gather(1, armn_o);
@@ -29077,59 +29108,83 @@ void IdealMhdModel::applyExactForceJacobianTranspose(
   m_physical_scratch.decomposeInto(m_decomposed_out, m_p_.scalxc);
 }
 
+// Transpose of the geometry-to-chi' map for ncurr==1: (dchi'/dx)^T chip_bar,
+// in the decomposed internal basis. chip_bar has one entry per half surface
+// (index jH-nsMinH). Seeds the reverse-mode force-density kernel on block 20
+// alone (all force-member cotangents zero) and reuses the B^T untransform of
+// applyExactForceJacobianTranspose, since chi' shares the same nonlinear
+// geometry dependence (guu, bsupu, bsupv, gsqrt) as the force densities.
+void IdealMhdModel::chipStateVjp(const double* geomP, int geom_stride,
+                                 const double* chip_bar,
+                                 FourierGeometry& m_physical_scratch,
+                                 FourierGeometry& m_decomposed_out) {
+  const int gS = geom_stride;
+  const int nForce = (r_.nsMaxFIncludingLcfs - r_.nsMinF) * s_.nZnT;
+  const int nH = r_.nsMaxH - r_.nsMinH;
+
+  std::vector<double> force_bar(kLocalForceBlocks * nForce, 0.0);
+  for (int jH = 0; jH < nH; ++jH) {
+    force_bar[20 * nForce + jH] = chip_bar[jH];
+  }
+
+  std::vector<double> geom_bar(20 * gS, 0.0);
+  exactForceDensityCotangent(geomP, force_bar.data(), gS, geom_bar.data());
+
+  // B^T: transpose of packGeometry's linear pre-chain, restricted to the
+  // blocks chi' actually depends on (r1, ru, zu, lu/lv via bsupu/bsupv; chi'
+  // does not depend on rv/zv, the constraint blocks, or the primal's phipF
+  // shift, which drops out of a tangent/cotangent map).
+  auto scat = [&](int b, Eigen::VectorXd& dst) {
+    const int sz = std::min(gS, static_cast<int>(dst.size()));
+    for (int i = 0; i < sz; ++i) dst[i] = geom_bar[b * gS + i];
+  };
+  scat(0, r1_e);
+  scat(1, r1_o);
+  scat(2, z1_e);
+  scat(3, z1_o);
+  scat(4, ru_e);
+  scat(5, ru_o);
+  scat(6, zu_e);
+  scat(7, zu_o);
+  for (int i = 0; i < gS; ++i) {
+    lu_e[i] = constants_.lamscale * geom_bar[12 * gS + i];
+    lu_o[i] = constants_.lamscale * geom_bar[13 * gS + i];
+  }
+  if (s_.lthreed) {
+    scat(8, rv_e);
+    scat(9, rv_o);
+    scat(10, zv_e);
+    scat(11, zv_o);
+    for (int i = 0; i < gS; ++i) {
+      lv_e[i] = constants_.lamscale * geom_bar[14 * gS + i];
+      lv_o[i] = constants_.lamscale * geom_bar[15 * gS + i];
+    }
+  }
+  // chi' has zero cotangent on the constraint blocks, but the transpose DFT
+  // unconditionally reads rCon/zCon as reused cotangent scratch (see
+  // applyExactForceJacobianTranspose's scat(16, rCon)/scat(17, zCon)); zero
+  // them so a stale primal or cotangent left by an earlier call on this model
+  // does not leak in.
+  rCon.setZero();
+  zCon.setZero();
+  if (s_.lthreed) {
+    dft_FourierToRealTranspose_3d_symm(m_physical_scratch);
+  } else {
+    dft_FourierToRealTranspose_2d_symm(m_physical_scratch);
+  }
+  m_physical_scratch.extrapolateTowardsAxisTranspose();
+  m_physical_scratch.m1Constraint(1.0, signOfJacobian);
+  m_physical_scratch.decomposeInto(m_decomposed_out, m_p_.scalxc);
+}
+
 // Diagnostic: max |composed force density - production force density| at the
 // current state, to isolate composition bugs from the transform/tangent path.
 double IdealMhdModel::composedForceResidual(const double* geomP,
                                             int geom_stride) {
-  LocalForceComposition comp;
-  comp.nZnT = s_.nZnT;
-  comp.geom_stride = geom_stride;
-  const int nForce = (r_.nsMaxFIncludingLcfs - r_.nsMinF) * s_.nZnT;
-  comp.force_stride = nForce;
-  comp.nsMinF = r_.nsMinF;
-  comp.nsMinF1 = r_.nsMinF1;
-  comp.nsMinH = r_.nsMinH;
-  comp.nsMaxH = r_.nsMaxH;
-  comp.jMaxRZ = std::min(r_.nsMaxF, m_fc_.ns - 1);
-  comp.nsMaxFIncludingLcfs = r_.nsMaxFIncludingLcfs;
-  comp.sqrtSF = m_p_.sqrtSF.data();
-  comp.sqrtSH = m_p_.sqrtSH.data();
-  comp.chipH = m_p_.chipH.data();
-  comp.presH = m_p_.presH.data();
-  comp.radialBlending = m_p_.radialBlending.data();
-  comp.deltaS = m_fc_.deltaS;
-  comp.dSHalfDsInterp = dSHalfDsInterp;
-  comp.lamscale = constants_.lamscale;
-  comp.lthreed = s_.lthreed;
-  comp.with_constraint = true;
-  comp.lasym = s_.lasym;
-  comp.nsMaxF = r_.nsMaxF;
-  comp.nZeta = s_.nZeta;
-  comp.nThetaEff = s_.nThetaEff;
-  comp.ncurr = ncurr;
-  comp.currH = m_p_.currH.data();
-  comp.wInt = s_.wInt.data();
-  comp.nThetaEven = s_.nThetaEven;
-  comp.nThetaReduced = s_.nThetaReduced;
-  comp.mpol = s_.mpol;
-  comp.ntor = s_.ntor;
-  comp.nnyq2 = s_.nnyq2;
-  comp.rCon0 = rCon0.data();
-  comp.zCon0 = zCon0.data();
-  comp.faccon = faccon.data();
-  comp.tcon = tcon.data();
-  comp.sinmui = t_.sinmui.data();
-  comp.cosmui = t_.cosmui.data();
-  comp.cosnv = t_.cosnv.data();
-  comp.sinnv = t_.sinnv.data();
-  comp.sinmu = t_.sinmu.data();
-  comp.cosmu = t_.cosmu.data();
-
-  const int nH = (r_.nsMaxH - r_.nsMinH) * s_.nZnT;
-  const int nWork = 15 * nH + 30 * s_.nZnT + 4 * nForce + 4 * (s_.ntor + 1) +
-                    s_.nZnT + s_.nThetaReduced;
-  std::vector<double> work(nWork, 0.0);
-  std::vector<double> force(20 * nForce, 0.0);
+  LocalForceComposition comp = makeLocalForceComposition(geom_stride);
+  const int nForce = comp.force_stride;
+  std::vector<double> work(LocalForceWorkSize(comp), 0.0);
+  std::vector<double> force(kLocalForceBlocks * nForce, 0.0);
   ComputeLocalForceDensity(geomP, work.data(), force.data(), &comp);
 
   double maxd = 0.0;
