@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-20-gd66698e9
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -4771,7 +4771,8 @@ absl::StatusOr<CurveRZFourier> CurveRZFourierFromCsv(
     return absl::InvalidArgumentError("cannot read header line");
   }
 
-  if (header_line != "n,raxis_c,zaxis_s,raxis_s,zaxis_c") {
+  if (absl::StripAsciiWhitespace(header_line) !=
+      "n,raxis_c,zaxis_s,raxis_s,zaxis_c") {
     return absl::NotFoundError(
         "header line 'n,raxis_c,zaxis_s,raxis_s,zaxis_c' not found");
   }
@@ -4976,7 +4977,7 @@ absl::StatusOr<SurfaceRZFourier> SurfaceRZFourierFromCsv(
     return absl::InvalidArgumentError("cannot read header line");
   }
 
-  if (header_line != "n,m,rbc,zbs,rbs,zbc") {
+  if (absl::StripAsciiWhitespace(header_line) != "n,m,rbc,zbs,rbs,zbc") {
     return absl::NotFoundError("header line 'n,m,rbc,zbs,rbs,zbc' not found");
   }
 
@@ -5304,14 +5305,6 @@ int get_max_threads(std::optional<int> max_threads) {
   CHECK_GT(max_threads.value(), 0)
       << "The number of threads must be >=1. "
          "To automatically use all available threads, pass std::nullopt";
-#ifdef _OPENMP
-  // Size the thread pool immediately so spin-waiting threads are not created
-  // for cores that will never be used. Without this, omp_get_max_threads()
-  // returns the hardware count and the runtime may spawn that many threads
-  // before vmec_adjust_num_threads narrows the count at the first multigrid
-  // step.
-  omp_set_num_threads(max_threads.value());
-#endif  // _OPENMP
   return max_threads.value();
 }
 
@@ -5987,8 +5980,9 @@ void TridiagonalSolveOpenMP(
 // ----------------------
 // VMEC-specific
 
-// Compute the maximum allowed number of threads for a VMEC++ run with given
-// radial resolution and adjust the number of OpenMP threads accordingly.
+// Compute the number of threads for the radial solve at the given radial
+// resolution. The count is passed to the parallel region as a num_threads
+// clause; the process-wide OpenMP thread count is left alone.
 int vmec_adjust_num_threads(int max_threads, int num_surfaces_to_distribute);
 
 // Compute the number of threads to use for the free-boundary (NESTOR) vacuum
@@ -5996,8 +5990,7 @@ int vmec_adjust_num_threads(int max_threads, int num_surfaces_to_distribute);
 // (nZnT points), so - unlike the radial solve, which is capped at ns/2 - it can
 // use as many threads as there are tangential grid points. This count is
 // deliberately decoupled from the radial thread count so the vacuum solve can
-// use the full thread budget even at coarse multigrid steps (small ns).
-// Unlike vmec_adjust_num_threads, this does NOT call omp_set_num_threads: the
+// use the full thread budget even at coarse multigrid steps (small ns). The
 // vacuum solve runs in a nested parallel region with an explicit num_threads()
 // clause.
 int vmec_adjust_vacuum_num_threads(int max_threads, int n_znt);
@@ -6101,8 +6094,8 @@ class VmecINDATA {
   // number
   int ntheta;
 
-  // number of toroidal grid points; must match nzeta of mgrid file if using
-  // free-boundary
+  // number of toroidal grid points, raised to 2 * ntor + 4 when smaller; the
+  // mgrid file must carry the resulting number if using free-boundary
   int nzeta;
 
   // ---------------------------------
@@ -9934,6 +9927,9 @@ absl::Status WriteMakegridNetCDFFile(
 #endif  // VMECPP_COMMON_MAKEGRID_LIB_MAKEGRID_LIB_H_
 
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10000,6 +9996,25 @@ absl::Status IsValidMakegridParameters(
     return absl::InvalidArgumentError(
         absl::StrFormat("number_of_z_grid_points must be > 1, but is %d",
                         makegrid_parameters.number_of_z_grid_points));
+  }
+
+  // the planes filled by stellarator symmetry are mirrored through Z = 0
+  constexpr double kZGridSymmetryTolerance =
+      64.0 * std::numeric_limits<double>::epsilon();
+  const double z_grid_symmetry_error =
+      makegrid_parameters.z_grid_minimum + makegrid_parameters.z_grid_maximum;
+  const double z_grid_symmetry_scale =
+      1.0 + std::max(std::abs(makegrid_parameters.z_grid_minimum),
+                     std::abs(makegrid_parameters.z_grid_maximum));
+  if (makegrid_parameters.assume_stellarator_symmetry &&
+      std::abs(z_grid_symmetry_error) >
+          kZGridSymmetryTolerance * z_grid_symmetry_scale) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "assume_stellarator_symmetry needs z_grid_minimum = -z_grid_maximum, "
+        "but the Z grid runs from z_grid_minimum = % .3e to z_grid_maximum = "
+        "% .3e, which sum to % .3e",
+        makegrid_parameters.z_grid_minimum, makegrid_parameters.z_grid_maximum,
+        z_grid_symmetry_error));
   }
 
   // at least a single point in phi direction (one plane)
@@ -11461,10 +11476,8 @@ int vmec_adjust_num_threads(const int max_threads,
   int num_threads = std::min(max_threads, num_surfaces_to_distribute / 2);
 
 #ifdef _OPENMP
-  // This must be done _before_ the '#pragma omp parallel' is entered.
-  omp_set_num_threads(num_threads);
-
-  // Explicitly turn off dynamic threads.
+  // The parallel regions request their team size with a num_threads clause;
+  // without dynamic adjustment the runtime grants exactly that many threads.
   omp_set_dynamic(0);
 #endif
 
@@ -11476,9 +11489,7 @@ int vmec_adjust_vacuum_num_threads(const int max_threads, const int n_znt) {
   // (see TangentialPartitioning). There is no minimum-points-per-thread
   // constraint like the radial solve's shared half-grid point, so we can use up
   // to nZnT threads. In practice nZnT >> max_threads, so this returns
-  // max_threads. Deliberately does NOT call omp_set_num_threads: the vacuum
-  // solve runs in a nested parallel region with an explicit num_threads()
-  // clause.
+  // max_threads.
   return std::min(max_threads, n_znt);
 }
 
@@ -11526,7 +11537,8 @@ struct BoundaryCoefficient {
   // Try to read a VMEC boundary description from the given JSON data.
   // If the variable is not present in the given JSON object, status will be ok
   // and optional will be not populated. If the variable was found, but was not
-  // the correct type, the status will be not ok.
+  // the correct type, or an entry lacks "m", "n" or "value" or has a negative
+  // "m", the status will be not ok.
   static absl::StatusOr<std::optional<std::vector<BoundaryCoefficient> > >
   FromJson(const nlohmann::json& j, const std::string& name);
 };  // BoundaryCoefficient
@@ -11589,8 +11601,14 @@ BoundaryCoefficient::FromJson(const json& j, const std::string& name) {
       return m.status();
     }
     if (!m->has_value()) {
-      // skip entries where "m" is not specified
-      continue;
+      return absl::InvalidArgumentError(
+          absl::StrFormat("JSON entry '%s'[%d] has no 'm'", name, i));
+    }
+    if (m->value() < 0) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("JSON entry '%s'[%d] has m = %d, but m cannot be "
+                          "negative",
+                          name, i, m->value()));
     }
 
     auto n = JsonReadInt(entry, "n");
@@ -11598,8 +11616,8 @@ BoundaryCoefficient::FromJson(const json& j, const std::string& name) {
       return n.status();
     }
     if (!n->has_value()) {
-      // skip entries where "n" is not specified
-      continue;
+      return absl::InvalidArgumentError(
+          absl::StrFormat("JSON entry '%s'[%d] has no 'n'", name, i));
     }
 
     auto value = JsonReadDouble(entry, "value");
@@ -11607,8 +11625,8 @@ BoundaryCoefficient::FromJson(const json& j, const std::string& name) {
       return value.status();
     }
     if (!value->has_value()) {
-      // skip entries where "value" is not specified
-      continue;
+      return absl::InvalidArgumentError(
+          absl::StrFormat("JSON entry '%s'[%d] has no 'value'", name, i));
     }
 
     BoundaryCoefficient boundary_coefficient = {
@@ -12756,6 +12774,10 @@ absl::StatusOr<VmecINDATA> VmecINDATA::FromJson(
   }
 
   if (vmec_indata.lasym) {
+    // an absent raxis_s or zaxis_c is a zero one, as for raxis_c and zaxis_s
+    vmec_indata.raxis_s.emplace().setZero(expected_axis_size);
+    vmec_indata.zaxis_c.emplace().setZero(expected_axis_size);
+
     auto maybe_raxis_s = JsonReadVectorDouble(j, "raxis_s");
     if (!maybe_raxis_s.ok()) {
       return maybe_raxis_s.status();
@@ -13216,10 +13238,10 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
         vmec_indata.pres_scale));
   }
 
-  // adiabatic_index
+  // gamma
   if (vmec_indata.gamma == 1.0) {
     return absl::InvalidArgumentError(
-        absl::StrFormat("input variable 'adiabatic_index' must not be 1.0\n"));
+        absl::StrFormat("input variable 'gamma' must not be 1.0\n"));
   }
 
   // spres_ped
@@ -13357,6 +13379,15 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
   }
 
   if (vmec_indata.lasym) {
+    // when lasym == true, these arrays have to be set
+    if (!vmec_indata.raxis_s.has_value()) {
+      return absl::InvalidArgumentError(
+          "input variable 'raxis_s' has to be set when 'lasym' is true.");
+    }
+    if (!vmec_indata.zaxis_c.has_value()) {
+      return absl::InvalidArgumentError(
+          "input variable 'zaxis_c' has to be set when 'lasym' is true.");
+    }
     // raxis_s
     if (vmec_indata.raxis_s->size() != expected_axis_size) {
       return absl::InvalidArgumentError(
@@ -13415,6 +13446,15 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
   }
 
   if (vmec_indata.lasym) {
+    // when lasym == true, these arrays have to be set
+    if (!vmec_indata.rbs.has_value()) {
+      return absl::InvalidArgumentError(
+          "input variable 'rbs' has to be set when 'lasym' is true.");
+    }
+    if (!vmec_indata.zbc.has_value()) {
+      return absl::InvalidArgumentError(
+          "input variable 'zbc' has to be set when 'lasym' is true.");
+    }
     // rbs
     if (vmec_indata.rbs->rows() != vmec_indata.mpol) {
       return absl::InvalidArgumentError(
@@ -15265,21 +15305,30 @@ absl::Status MGridProvider::LoadFile(const std::filesystem::path& filename,
 
   nextcur = *nextcur_or;
 
-  // coil_group is a [nextcur][string width] character array, each name padded
-  // on the right. The width is whatever the file declares, so a writer that
+  // coil_group is a [groups][string width] character array, each name padded
+  // on the right. Both lengths are whatever the file declares, so a writer that
   // does not use MAKEGRID's 30 still reads correctly.
   coil_group_names.clear();
   {
     int id_coil_group = 0;
+    int num_dimensions = 0;
     std::array<int, 2> coil_group_dimensions = {0, 0};
+    size_t num_groups = 0;
     size_t string_width = 0;
     if (nc_inq_varid(ncid, "coil_group", &id_coil_group) == NC_NOERR &&
+        nc_inq_varndims(ncid, id_coil_group, &num_dimensions) == NC_NOERR &&
+        num_dimensions == 2 &&
         nc_inq_vardimid(ncid, id_coil_group, coil_group_dimensions.data()) ==
+            NC_NOERR &&
+        nc_inq_dimlen(ncid, coil_group_dimensions[0], &num_groups) ==
             NC_NOERR &&
         nc_inq_dimlen(ncid, coil_group_dimensions[1], &string_width) ==
             NC_NOERR &&
         string_width > 0) {
-      std::vector<char> raw(static_cast<size_t>(nextcur) * string_width);
+      // nc_get_var_text writes all the groups the file declares; the names of
+      // groups it lacks up to nextcur stay empty
+      std::vector<char> raw(std::max(num_groups, static_cast<size_t>(nextcur)) *
+                            string_width);
       if (nc_get_var_text(ncid, id_coil_group, raw.data()) == NC_NOERR) {
         coil_group_names.reserve(nextcur);
         for (int i = 0; i < nextcur; ++i) {
@@ -20232,7 +20281,9 @@ class FourierGeometry : public FourierCoeffs {
   // coefficients. If a Boundaries object is specified (defaults to nullptr; in
   // order to avoid a copy when using std::optional), the geometry of the
   // outermost flux surface (at ns-1) is taken from that Boundaries object
-  // instead of from the Fourier coefficient matrices.
+  // instead of from the Fourier coefficient matrices, and the inner surfaces
+  // are shifted by the difference between the two with the radial weights of
+  // interpFromBoundaryAndAxis.
   // This latter use case applies to fixed-boundary hot-restart operation of
   // VMEC++.
   // rmns, zmnc and lmnc_full carry the non-stellarator-symmetric half of the
@@ -20329,6 +20380,29 @@ std::span<const double> SurfaceOf(std::span<const double> coefficients,
   }
   return coefficients.subspan(surface_offset, coefficients_per_surface);
 }
+
+// R and Z Fourier coefficients of one flux surface in the product basis,
+// indexed like the Boundaries arrays by m * (ntor + 1) + n.
+struct ProductBasisSurface {
+  explicit ProductBasisSurface(int mnsize)
+      : rcc(mnsize),
+        rss(mnsize),
+        rsc(mnsize),
+        rcs(mnsize),
+        zsc(mnsize),
+        zcs(mnsize),
+        zcc(mnsize),
+        zss(mnsize) {}
+
+  std::vector<double> rcc;
+  std::vector<double> rss;
+  std::vector<double> rsc;
+  std::vector<double> rcs;
+  std::vector<double> zsc;
+  std::vector<double> zcs;
+  std::vector<double> zcc;
+  std::vector<double> zss;
+};
 }  // namespace
 
 FourierGeometry::FourierGeometry(const Sizes* s, const RadialPartitioning* r,
@@ -20510,60 +20584,106 @@ void FourierGeometry::InitFromState(
   const int max_ns_to_set_rz_on_from_state = (b == nullptr) ? ns : ns - 1;
   const int max_ns_to_set_rz_on_from_state_locally =
       std::min(nsMax_, max_ns_to_set_rz_on_from_state);
-  for (int jF = nsMin_; jF < max_ns_to_set_rz_on_from_state_locally; ++jF) {
+
+  // Surface jF of the given state in the product basis, scaled like the
+  // coefficients held here.
+  const int mnsize = s_.mpol * (s_.ntor + 1);
+  const auto state_surface = [&](int jF) {
+    ProductBasisSurface surface(mnsize);
+
     const Eigen::VectorXd rmnc_col = rmnc.col(jF);
     const std::vector<double> rmnc_col_vector(
         rmnc_col.data(), rmnc_col.data() + rmnc_col.size());
-    std::vector<double> rmncc_at_jF(s_.mpol * (s_.ntor + 1));
-    std::vector<double> rmnss_at_jF(s_.mpol * (s_.ntor + 1));
-    fb.cos_to_cc_ss(rmnc_col_vector, rmncc_at_jF, rmnss_at_jF, s_.ntor,
+    fb.cos_to_cc_ss(rmnc_col_vector, surface.rcc, surface.rss, s_.ntor,
                     s_.mpol);
 
     const Eigen::VectorXd zmns_col = zmns.col(jF);
     const std::vector<double> zmns_col_vector(
         zmns_col.data(), zmns_col.data() + zmns_col.size());
-    std::vector<double> zmnsc_at_jF(s_.mpol * (s_.ntor + 1));
-    std::vector<double> zmncs_at_jF(s_.mpol * (s_.ntor + 1));
-    fb.sin_to_sc_cs(zmns_col_vector, zmnsc_at_jF, zmncs_at_jF, s_.ntor,
+    fb.sin_to_sc_cs(zmns_col_vector, surface.zsc, surface.zcs, s_.ntor,
                     s_.mpol);
 
     // Antisymmetric half: R is written to the wout in the combined sine basis
     // and Z in the combined cosine basis, i.e. mirrored with respect to the
     // symmetric half above, so the two conversions swap accordingly.
-    std::vector<double> rmnsc_at_jF(s_.mpol * (s_.ntor + 1));
-    std::vector<double> rmncs_at_jF(s_.mpol * (s_.ntor + 1));
-    std::vector<double> zmncc_at_jF(s_.mpol * (s_.ntor + 1));
-    std::vector<double> zmnss_at_jF(s_.mpol * (s_.ntor + 1));
     if (s_.lasym) {
       const Eigen::VectorXd rmns_col = rmns.col(jF);
       const std::vector<double> rmns_col_vector(
           rmns_col.data(), rmns_col.data() + rmns_col.size());
-      fb.sin_to_sc_cs(rmns_col_vector, rmnsc_at_jF, rmncs_at_jF, s_.ntor,
+      fb.sin_to_sc_cs(rmns_col_vector, surface.rsc, surface.rcs, s_.ntor,
                       s_.mpol);
 
       const Eigen::VectorXd zmnc_col = zmnc.col(jF);
       const std::vector<double> zmnc_col_vector(
           zmnc_col.data(), zmnc_col.data() + zmnc_col.size());
-      fb.cos_to_cc_ss(zmnc_col_vector, zmncc_at_jF, zmnss_at_jF, s_.ntor,
+      fb.cos_to_cc_ss(zmnc_col_vector, surface.zcc, surface.zss, s_.ntor,
                       s_.mpol);
     }
+    return surface;
+  };
 
+  for (int jF = nsMin_; jF < max_ns_to_set_rz_on_from_state_locally; ++jF) {
+    const ProductBasisSurface surface = state_surface(jF);
     for (int m = 0; m < s_.mpol; ++m) {
       for (int n = 0; n < s_.ntor + 1; ++n) {
         const int idx_mn = m * (s_.ntor + 1) + n;
         const int idx_jmn = ((jF - nsMin_) * s_.mpol + m) * (s_.ntor + 1) + n;
-        rmncc[idx_jmn] = rmncc_at_jF[idx_mn];
-        zmnsc[idx_jmn] = zmnsc_at_jF[idx_mn];
+        rmncc[idx_jmn] = surface.rcc[idx_mn];
+        zmnsc[idx_jmn] = surface.zsc[idx_mn];
         if (s_.lthreed) {
-          rmnss[idx_jmn] = rmnss_at_jF[idx_mn];
-          zmncs[idx_jmn] = zmncs_at_jF[idx_mn];
+          rmnss[idx_jmn] = surface.rss[idx_mn];
+          zmncs[idx_jmn] = surface.zcs[idx_mn];
         }
         if (s_.lasym) {
-          rmnsc[idx_jmn] = rmnsc_at_jF[idx_mn];
-          zmncc[idx_jmn] = zmncc_at_jF[idx_mn];
+          rmnsc[idx_jmn] = surface.rsc[idx_mn];
+          zmncc[idx_jmn] = surface.zcc[idx_mn];
           if (s_.lthreed) {
-            rmncs[idx_jmn] = rmncs_at_jF[idx_mn];
-            zmnss[idx_jmn] = zmnss_at_jF[idx_mn];
+            rmncs[idx_jmn] = surface.rcs[idx_mn];
+            zmnss[idx_jmn] = surface.zss[idx_mn];
+          }
+        }
+      }
+    }
+  }
+
+  if (b != nullptr) {
+    // Shift the inner surfaces by the difference between the boundary from b
+    // and the outermost surface of the state, weighted like the initial guess
+    // of interpFromBoundaryAndAxis: s for m = 0 and s^{m/2} for m > 0. The
+    // inner surfaces do not carry the m=1 constraint yet, so b enters with it
+    // undone.
+    Boundaries boundary = *b;
+    boundary.ensureM1Constrained(1.0);
+    const ProductBasisSurface lcfs = state_surface(ns - 1);
+    for (int jF = nsMin_; jF < max_ns_to_set_rz_on_from_state_locally; ++jF) {
+      const double sqrt_s = p.sqrtSF[jF - r_.nsMinF1];
+      for (int m = 0; m < s_.mpol; ++m) {
+        const double weight = (m == 0) ? sqrt_s * sqrt_s : pow(sqrt_s, m);
+        for (int n = 0; n < s_.ntor + 1; ++n) {
+          const int idx_mn = m * (s_.ntor + 1) + n;
+          const int idx_jmn = ((jF - nsMin_) * s_.mpol + m) * (s_.ntor + 1) + n;
+          const double basis_norm = 1.0 / (fb.mscale[m] * fb.nscale[n]);
+          rmncc[idx_jmn] +=
+              weight * (basis_norm * boundary.rbcc[idx_mn] - lcfs.rcc[idx_mn]);
+          zmnsc[idx_jmn] +=
+              weight * (basis_norm * boundary.zbsc[idx_mn] - lcfs.zsc[idx_mn]);
+          if (s_.lthreed) {
+            rmnss[idx_jmn] += weight * (basis_norm * boundary.rbss[idx_mn] -
+                                        lcfs.rss[idx_mn]);
+            zmncs[idx_jmn] += weight * (basis_norm * boundary.zbcs[idx_mn] -
+                                        lcfs.zcs[idx_mn]);
+          }
+          if (s_.lasym) {
+            rmnsc[idx_jmn] += weight * (basis_norm * boundary.rbsc[idx_mn] -
+                                        lcfs.rsc[idx_mn]);
+            zmncc[idx_jmn] += weight * (basis_norm * boundary.zbcc[idx_mn] -
+                                        lcfs.zcc[idx_mn]);
+            if (s_.lthreed) {
+              rmncs[idx_jmn] += weight * (basis_norm * boundary.rbcs[idx_mn] -
+                                          lcfs.rcs[idx_mn]);
+              zmnss[idx_jmn] += weight * (basis_norm * boundary.zbss[idx_mn] -
+                                          lcfs.zss[idx_mn]);
+            }
           }
         }
       }
@@ -24856,14 +24976,22 @@ struct OutputQuantities {
   bool operator!=(const OutputQuantities& o) const { return !(*this == o); }
 
   // Write the output quantities to the HDF5 file at the specified path.
-  // If a file already exists, it is overwritten.
+  // If a file already exists, it is overwritten. A file HDF5 cannot create or
+  // write is reported as kInternal.
   absl::Status Save(const std::filesystem::path& path) const;
 
   // Return a OutputQuantities instance populated with the contents of the
   // specified HDF5 file. The file is expected to have the same schema as the
-  // one produced by OutputQuantities::Save.
+  // one produced by OutputQuantities::Save. A file HDF5 cannot open or read is
+  // reported as kInternal.
   static absl::StatusOr<OutputQuantities> Load(
       const std::filesystem::path& path);
+
+ private:
+  // Save and Load on an open file; HDF5 reports a failure in them by throwing
+  // an H5::Exception.
+  absl::Status WriteTo(H5::H5File& file) const;
+  static absl::StatusOr<OutputQuantities> ReadFrom(H5::H5File& file);
 };
 
 // Compute the output quantities of VMEC++.
@@ -25099,16 +25227,19 @@ void ScaleLambda(std::vector<double>& m_coefficients,
 }
 
 void ConvertM1ToPhysical(GeometryCoefficients& m_coefficients,
-                         const VmecINDATA& indata, int num_full) {
-  auto convert = [num_full, &indata](std::vector<double>& m_r,
-                                     std::vector<double>& m_z) {
+                         const VmecINDATA& indata, int num_full,
+                         int sign_of_jacobian) {
+  // same map as FourierCoeffs::m1Constraint with scaling factor 1
+  const double sigma = -sign_of_jacobian;
+  auto convert = [num_full, sigma, &indata](std::vector<double>& m_r,
+                                            std::vector<double>& m_z) {
     if (m_r.empty() || m_z.empty()) return;
     for (int j = 0; j < num_full; ++j) {
       for (int n = 0; n <= indata.ntor; ++n) {
         const int index = (j * indata.mpol + 1) * (indata.ntor + 1) + n;
         const double old_r = m_r[index];
-        m_r[index] = old_r + m_z[index];
-        m_z[index] = old_r - m_z[index];
+        m_r[index] = old_r + sigma * m_z[index];
+        m_z[index] = sigma * old_r - m_z[index];
       }
     }
   };
@@ -25189,7 +25320,8 @@ Geometry MakeGeometry(const VmecINDATA& indata,
   ScaleLambda(coefficients.lambda_ss, internal, modes_per_surface);
 
   if (state == GeometryCoefficientState::kSolver) {
-    ConvertM1ToPhysical(coefficients, indata, internal.num_full);
+    ConvertM1ToPhysical(coefficients, indata, internal.num_full,
+                        internal.sign_of_jacobian);
   }
 
   return result;
@@ -31918,10 +32050,7 @@ absl::Status vmecpp::WOutFileContents::LoadInto(WOutFileContents& m_obj,
 #undef WRITEMEMBER
 #undef READMEMBER
 
-absl::Status vmecpp::OutputQuantities::Save(
-    const std::filesystem::path& path) const {
-  H5::H5File file(path, H5F_ACC_TRUNC);
-
+absl::Status vmecpp::OutputQuantities::WriteTo(H5::H5File& file) const {
   absl::Status status;
 
   status = vmec_internal_results.WriteTo(file);
@@ -32027,10 +32156,8 @@ absl::Status vmecpp::OutputQuantities::Save(
   return absl::OkStatus();
 }
 
-absl::StatusOr<vmecpp::OutputQuantities> vmecpp::OutputQuantities::Load(
-    const std::filesystem::path& path) {
-  H5::H5File file(path, H5F_ACC_RDONLY);
-
+absl::StatusOr<vmecpp::OutputQuantities> vmecpp::OutputQuantities::ReadFrom(
+    H5::H5File& file) {
   OutputQuantities oq;
   absl::Status status;
 
@@ -32145,6 +32272,30 @@ absl::StatusOr<vmecpp::OutputQuantities> vmecpp::OutputQuantities::Load(
   }
 
   return oq;
+}
+
+absl::Status vmecpp::OutputQuantities::Save(
+    const std::filesystem::path& path) const {
+  try {
+    H5::H5File file(path, H5F_ACC_TRUNC);
+    return WriteTo(file);
+  } catch (const H5::Exception& exception) {
+    return absl::InternalError(
+        absl::StrFormat("could not write '%s': %s: %s", path.string(),
+                        exception.getFuncName(), exception.getDetailMsg()));
+  }
+}
+
+absl::StatusOr<vmecpp::OutputQuantities> vmecpp::OutputQuantities::Load(
+    const std::filesystem::path& path) {
+  try {
+    H5::H5File file(path, H5F_ACC_RDONLY);
+    return ReadFrom(file);
+  } catch (const H5::Exception& exception) {
+    return absl::InternalError(
+        absl::StrFormat("could not read '%s': %s: %s", path.string(),
+                        exception.getFuncName(), exception.getDetailMsg()));
+  }
 }
 
 vmecpp::Threed1FreeBoundary vmecpp::ComputeThreed1FreeBoundary(
@@ -35676,7 +35827,7 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   // COMPUTE |B| = SQRT(|B|**2) and store in bsq, bsqa
   std::vector<double> magnetic_pressure((fc.ns - 1) * s.nZnT, 0.0);
 #ifdef _OPENMP
-#pragma omp parallel for
+#pragma omp parallel for num_threads(fc.max_threads())
 #endif
   for (int jH = 0; jH < fc.ns - 1; ++jH) {
     for (int kl = 0; kl < s.nZnT; ++kl) {
@@ -35691,11 +35842,7 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   // The Nyquist-grid forward transform below sums over the reduced poloidal
   // range [0, nThetaReduced) for both parities; the symmetric and antisymmetric
   // parts are split inline in the loop (symoutput). The 0.5 integration norm is
-  // therefore the same with or without lasym. educational_VMEC doubles it for
-  // lasym because it integrates over the full poloidal range; applying that
-  // doubling here, where the sum is over the reduced range, double-counts and
-  // made a symmetric case run in lasym=true mode report these coefficients at
-  // twice their value.
+  // therefore the same with or without lasym.
   const double tmult = 0.5;
 
   // -------------------
@@ -35745,7 +35892,7 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   const int partial_sum_size = (s.mnyq + 1) * s.nZeta;
 
 #ifdef _OPENMP
-#pragma omp parallel
+#pragma omp parallel num_threads(fc.max_threads())
   {
 #endif
     std::vector<double> Fc_gsqrt(partial_sum_size), Fs_gsqrt(partial_sum_size),
@@ -36056,7 +36203,7 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   // Use the same two-phase separable DFT as the half-grid loop above,
   // parallelised over full-grid surfaces jF.
 #ifdef _OPENMP
-#pragma omp parallel
+#pragma omp parallel num_threads(fc.max_threads())
   {
 #endif
     std::vector<double> Fc_bsubs_full(partial_sum_size),
@@ -38378,11 +38525,13 @@ absl::Status CheckInitialState(const vmecpp::HotRestartState& initial_state,
     return absl::InvalidArgumentError(absl::StrCat(msg_start, "ntor", msg_end));
   }
 
-  // check for matching `ns`
-  if (initial_state.indata.ns_array[initial_state.indata.ns_array.size() - 1] !=
-      indata.ns_array[0]) {
-    return absl::InvalidArgumentError(
-        absl::StrCat(msg_start, "ns_array", msg_end));
+  // check for matching `ns`: the state is read from the wout, one column per
+  // flux surface
+  if (initial_state.wout.ns != indata.ns_array[0]) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "%sns_array%s The wout of the initial state has ns = %d, but "
+        "ns_array[0] = %d.",
+        msg_start, msg_end, initial_state.wout.ns, indata.ns_array[0]));
   }
 
   return absl::OkStatus();
@@ -38539,12 +38688,20 @@ absl::StatusOr<bool> Vmec::run(const VmecCheckpoint& checkpoint,
         return status;
       }
     }
-    if (mgrid_.numPhi != indata_.nzeta) {
+    // Sizes raises nzeta to the minimum ntor allows, so s_.nZeta is the
+    // toroidal resolution of the run.
+    if (mgrid_.numPhi != s_.nZeta) {
+      const std::string raised_from =
+          s_.nZeta == indata_.nzeta
+              ? ""
+              : absl::StrFormat(
+                    " (nzeta = %d in VmecINDATA, raised to the "
+                    "minimum for ntor = %d)",
+                    indata_.nzeta, indata_.ntor);
       return absl::InvalidArgumentError(absl::StrFormat(
-          "MGridProvider has %d phi grid points, but VmecINDATA "
-          "has %d nzeta grid points. Please ensure that the two "
-          "are consistent.",
-          mgrid_.numPhi, indata_.nzeta));
+          "MGridProvider has %d phi grid points, but the run has %d toroidal "
+          "grid points%s. Please ensure that the two are consistent.",
+          mgrid_.numPhi, s_.nZeta, raised_from));
     }
     if (mgrid_.nfp != indata_.nfp) {
       return absl::InvalidArgumentError(absl::StrFormat(
@@ -39125,7 +39282,7 @@ absl::StatusOr<bool> Vmec::SolveEquilibrium(
 
 // NOTE: *THIS* is the main parallel region for the equilibrium solver
 #ifdef _OPENMP
-#pragma omp parallel
+#pragma omp parallel num_threads(num_threads_)
 #endif  // _OPENMP
   {
 #ifdef _OPENMP
@@ -40414,7 +40571,6 @@ void vmecpp::VmecConstants::reset() {
 #include <iostream>
 #include <string>
 
-#include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/strip.h"
 
@@ -40431,12 +40587,18 @@ int main(int argc, char **argv) {
 
   // read input file provided on command line
   absl::StatusOr<std::string> indata_json = ReadFile(argv[1]);
-  CHECK_OK(indata_json) << "Could not read input file '" << argv[1]
-                        << "': " << indata_json.status();
+  if (!indata_json.ok()) {
+    std::cerr << "Could not read input file '" << argv[1]
+              << "': " << indata_json.status() << "\n";
+    return 1;
+  }
 
   absl::StatusOr<VmecINDATA> vmec_indata = VmecINDATA::FromJson(*indata_json);
-  CHECK_OK(vmec_indata) << "Could not parse input file '" << argv[1]
-                        << "' into VmecINDATA: " << vmec_indata.status();
+  if (!vmec_indata.ok()) {
+    std::cerr << "Could not parse input file '" << argv[1]
+              << "' into VmecINDATA: " << vmec_indata.status() << "\n";
+    return 1;
+  }
 
   std::optional<int> max_threads = std::nullopt;
   if (argc == 3) {
@@ -40446,14 +40608,20 @@ int main(int argc, char **argv) {
   const absl::StatusOr<OutputQuantities> out =
       vmecpp::run(*vmec_indata, /*initial_state=*/std::nullopt,
                   /*max_threads=*/max_threads);
-
-  CHECK_OK(out) << "Error encountered during the VMEC++ run: " << out.status();
+  if (!out.ok()) {
+    std::cerr << "Error encountered during the VMEC++ run: " << out.status()
+              << "\n";
+    return 1;
+  }
 
   const std::string out_path =
       absl::StrCat(absl::StripSuffix(argv[1], ".json"), ".out.h5");
   const absl::Status status = out->Save(out_path);
-  CHECK_OK(status) << "Error encountered writing the output file '" << out_path
-                   << "': " << status;
+  if (!status.ok()) {
+    std::cerr << "Error encountered writing the output file '" << out_path
+              << "': " << status << "\n";
+    return 1;
+  }
 
   return 0;
 }
