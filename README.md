@@ -96,8 +96,8 @@ together, and the trailing backslash of a macro continuation is kept.
 Checked against a conventional multi-file build of the same sources: upstream's
 own CMake build at the same commit, configured with `-DVMECPP_USE_FFTX=OFF` so
 both binaries take the partial-DFT path and `-DVMECPP_HWCAPS_DISPATCH=OFF` so
-the reference loads its baseline x86-64 core, both compiled by GCC 13.3 on
-Ubuntu 24.04 against the pinned dependency versions. Every case in upstream's
+the reference loads its baseline x86-64 core, both compiled by GCC 15.2 on
+Ubuntu 26.04 against the pinned dependency versions. Every case in upstream's
 `test_data` was run single-threaded by both binaries and the resulting HDF5
 files compared dataset by dataset with `tools/compare_outputs.py`.
 
@@ -117,7 +117,7 @@ free-boundary Nestor and abscab paths.
 A Clang 21 build of the same file reproduces the GCC results bit-for-bit on all
 20 cases.
 
-The stripped layer goes through the same comparison under both GCC 13.3 and
+The stripped layer goes through the same comparison under both GCC 15.2 and
 Clang 21, and is bit-for-bit identical to the reference on all 20 cases with
 each. It is also checked structurally: `g++ -E` over both layers yields token
 streams of equal length that agree at every position but the `__FILE__` and

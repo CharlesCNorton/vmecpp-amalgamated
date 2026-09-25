@@ -9,12 +9,12 @@ Components
 
 VMEC++  -  https://github.com/proximafusion/vmecpp
     MIT License, Copyright (c) 2024-present Proxima Fusion GmbH.
-    Amalgamated from commit b4313afc (v0.7.4-7-gb4313afc). The sources are
-    inlined with only mechanical transformations: project headers are pasted in
-    dependency order, and two optional paths are compiled out, the FFTX/SPIRAL
-    transform (guarded by VMECPP_USE_FFTX), which leaves the partial-DFT path
-    VMEC++ uses when FFTX is off, and the Enzyme autodiff translation units
-    (guarded by VMECPP_ENABLE_ENZYME). No algorithmic changes were made.
+    Amalgamated from commit 494cd927 (v0.7.5). The sources are inlined with
+    only mechanical transformations: project headers are pasted in dependency
+    order, and two optional paths are compiled out, the FFTX/SPIRAL transform
+    (guarded by VMECPP_USE_FFTX), which leaves the partial-DFT path VMEC++ uses
+    when FFTX is off, and the Enzyme autodiff translation units (guarded by
+    VMECPP_ENABLE_ENZYME). No algorithmic changes were made.
     vmecpp_amalgamated.min.cc holds the same sources with comments and
     indentation removed; the per-file SPDX and copyright headers it drops are
     restated in the single notice at its head.

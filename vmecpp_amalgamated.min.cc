@@ -17,7 +17,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.4-7-gb4313afc
+// Provenance: github.com/proximafusion/vmecpp v0.7.5
 //
 // Scope matches vmecpp_amalgamated.cc exactly: the whole solver, fixed and
 // free boundary, every profile parameterization, the complete output suite and
@@ -2301,6 +2301,8 @@ return extent;
 
 namespace json_io {
 
+absl::StatusOr<nlohmann::json> JsonParse(const std::string& json_text);
+
 absl::StatusOr<std::optional<bool>> JsonReadBool(const nlohmann::json& j,
 const std::string& name);
 
@@ -2333,6 +2335,15 @@ using nlohmann::json;
 }
 
 namespace json_io {
+
+absl::StatusOr<json> JsonParse(const std::string& json_text) {
+try {
+return json::parse(json_text);
+} catch (const json::parse_error& parse_error) {
+return absl::InvalidArgumentError(
+absl::StrFormat("input is not valid JSON: %s", parse_error.what()));
+}
+}
 
 absl::StatusOr<std::optional<bool>> JsonReadBool(const json& j,
 const std::string& name) {
@@ -7487,6 +7498,7 @@ namespace makegrid {
 
 using nlohmann::json;
 
+using json_io::JsonParse;
 using json_io::JsonReadBool;
 using json_io::JsonReadDouble;
 using json_io::JsonReadInt;
@@ -7547,7 +7559,11 @@ return absl::OkStatus();
 
 absl::StatusOr<MakegridParameters> ImportMakegridParametersFromJson(
 const std::string& makegrid_parameters_json) {
-json j = json::parse(makegrid_parameters_json);
+absl::StatusOr<json> maybe_json = JsonParse(makegrid_parameters_json);
+if (!maybe_json.ok()) {
+return maybe_json.status();
+}
+const json& j = *maybe_json;
 
 MakegridParameters makegrid_parameters;
 
@@ -9112,6 +9128,7 @@ namespace vmecpp {
 
 using nlohmann::json;
 
+using json_io::JsonParse;
 using json_io::JsonReadBool;
 using json_io::JsonReadDouble;
 using json_io::JsonReadInt;
@@ -9526,7 +9543,11 @@ return absl::OkStatus();
 
 absl::StatusOr<VmecINDATA> VmecINDATA::FromJson(
 const std::string& indata_json) {
-json j = json::parse(indata_json);
+absl::StatusOr<json> maybe_json = JsonParse(indata_json);
+if (!maybe_json.ok()) {
+return maybe_json.status();
+}
+const json& j = *maybe_json;
 
 if (!j.is_object()) {
 return absl::InvalidArgumentError("root JSON element is not an object");
@@ -12419,6 +12440,22 @@ void updateAxisymmetric(const Eigen::VectorXd& bDotN);
 
 namespace vmecpp {
 
+inline constexpr int kChebyshevMomentBatch = 8;
+
+struct ChebyshevMomentWorkspace {
+
+std::vector<double> factor_sub2;
+std::vector<double> factor_sub1;
+std::vector<double> factor_diag;
+std::vector<double> factor_sup1;
+std::vector<double> factor_sup2;
+std::vector<double> factor_rhs;
+
+Eigen::Array<double, kChebyshevMomentBatch, Eigen::Dynamic> upper1;
+Eigen::Array<double, kChebyshevMomentBatch, Eigen::Dynamic> upper2;
+Eigen::Array<double, kChebyshevMomentBatch, Eigen::Dynamic> moments;
+};
+
 class SingularIntegrals {
 public:
 SingularIntegrals(const Sizes* s, const FourierBasisFastToroidal* fb,
@@ -12431,8 +12468,7 @@ int numSC;
 int numCS;
 int nzLen;
 
-Eigen::VectorXd cmn;
-Eigen::VectorXd cmns;
+Eigen::VectorXd chebyshev_coefficients;
 
 Eigen::VectorXd ap;
 Eigen::VectorXd am;
@@ -12452,21 +12488,11 @@ Eigen::VectorXd R0m;
 Eigen::VectorXd Ra1p;
 Eigen::VectorXd Ra1m;
 
-Eigen::VectorXd Tl2p;
+std::vector<Eigen::VectorXd> chebyshev_moments_p;
+std::vector<Eigen::VectorXd> chebyshev_moments_m;
 
-Eigen::VectorXd Tl2m;
-
-Eigen::VectorXd Tl1p;
-
-Eigen::VectorXd Tl1m;
-
-std::vector<Eigen::VectorXd> Tlp;
-
-std::vector<Eigen::VectorXd> Tlm;
-
-std::vector<Eigen::VectorXd> Slp;
-
-std::vector<Eigen::VectorXd> Slm;
+std::vector<Eigen::VectorXd> chebyshev_s_moments_p;
+std::vector<Eigen::VectorXd> chebyshev_s_moments_m;
 
 Eigen::VectorXd bvec_sin;
 
@@ -12493,6 +12519,8 @@ void performUpdate(const Eigen::VectorXd& bDotN, bool fullUpdate);
 
 int nf;
 int mf;
+
+ChebyshevMomentWorkspace moment_workspace_;
 };
 
 }
@@ -13195,39 +13223,141 @@ namespace vmecpp {
 
 namespace {
 
-constexpr double kMaxForwardLogGrowth = std::numbers::ln10;
+constexpr double kMinBoundaryLogDecay = 17.0 * std::numbers::ln10;
 
-constexpr double kMinSeedLogDecay = 17.0 * std::numbers::ln10;
+constexpr int kMinTail = 8;
+constexpr int kMaxTail = 4096;
 
-void ComputeTl(double A, double B, double d, double sqrtc2, double sqrta2,
-double T0, int kL, int kl, std::vector<Eigen::VectorXd>& m_T) {
-const auto rhs = [sqrtc2, sqrta2](int l) {
-return sqrtc2 + (l % 2 == 0 ? -sqrta2 : sqrta2);
-};
-m_T[0][kl] = T0;
-const double log_ratio = std::log(B / A);
-if (kL * log_ratio <= 2.0 * kMaxForwardLogGrowth) {
-double T_prev = 0.0;
-for (int l = 0; l < kL; ++l) {
-const double T_next =
-(rhs(l) - (2 * l + 1) * d * m_T[l][kl] - l * B * T_prev) /
-((l + 1) * A);
-T_prev = m_T[l][kl];
-m_T[l + 1][kl] = T_next;
+double ComputeT0(double a, double b2, double c) {
+const double A = a + b2 + c;
+const double root = 2.0 * std::sqrt(a * c);
+const double determinant = (root - b2) * (root + b2);
+const double hi = 2.0 * c + b2;
+const double lo = 2.0 * a + b2;
+const double sqrt_ca = 2.0 * std::sqrt(c * A);
+const double sqrt_aa = 2.0 * std::sqrt(a * A);
+const double numerator =
+hi >= 0.0 ? sqrt_ca + hi : determinant / (sqrt_ca - hi);
+const double denominator =
+lo >= 0.0 ? determinant / (sqrt_aa + lo) : sqrt_aa - lo;
+return std::log(numerator / denominator) / std::sqrt(A);
 }
-return;
+
+double EvaluateCmnPolynomial(int m, int n, double t) {
+const int k = std::abs(m - n);
+const int mu = std::min(m, n);
+const double x = 1.0 - 2.0 * t * t;
+double p_previous = 0.0;
+double p = 1.0;
+if (mu >= 1) {
+p_previous = 1.0;
+p = 0.5 * ((k + 2) * x + k);
+for (int j = 1; j < mu; ++j) {
+const double two_j_k = 2.0 * j + k;
+const double c_next = 2.0 * (j + 1) * (j + k + 1) * two_j_k;
+const double c_this =
+(two_j_k + 1.0) * ((two_j_k + 2.0) * two_j_k * x + k * k);
+const double c_previous = 2.0 * (j + k) * j * (two_j_k + 2.0);
+const double p_next = (c_this * p - c_previous * p_previous) / c_next;
+p_previous = p;
+p = p_next;
 }
-const int tail =
-static_cast<int>(std::ceil(2.0 * kMinSeedLogDecay / log_ratio));
-double T_hi = 0.0;
-double T_cur = 0.0;
-for (int l = kL + tail; l >= 1; --l) {
-const double T_lo =
-(rhs(l) - (2 * l + 1) * d * T_cur - (l + 1) * A * T_hi) / (l * B);
-T_hi = T_cur;
-T_cur = T_lo;
-if (1 <= l - 1 && l - 1 <= kL) {
-m_T[l - 1][kl] = T_lo;
+}
+const double sign = (std::max(0, n - m) % 2 == 0) ? 1.0 : -1.0;
+return sign * std::pow(t, k) * p;
+}
+
+void ComputeChebyshevMoments(const Eigen::VectorXd& a,
+const Eigen::VectorXd& b2,
+const Eigen::VectorXd& c, double b2_sign,
+int num_points, int kL,
+ChebyshevMomentWorkspace& m_workspace,
+std::vector<Eigen::VectorXd>& m_moments) {
+using Batch = Eigen::Array<double, kChebyshevMomentBatch, 1>;
+
+const std::vector<double>& factor_sub2 = m_workspace.factor_sub2;
+const std::vector<double>& factor_sub1 = m_workspace.factor_sub1;
+const std::vector<double>& factor_diag = m_workspace.factor_diag;
+const std::vector<double>& factor_sup1 = m_workspace.factor_sup1;
+const std::vector<double>& factor_sup2 = m_workspace.factor_sup2;
+const std::vector<double>& factor_rhs = m_workspace.factor_rhs;
+auto& upper1 = m_workspace.upper1;
+auto& upper2 = m_workspace.upper2;
+auto& moments = m_workspace.moments;
+
+upper1.leftCols(2).setZero();
+upper2.leftCols(2).setZero();
+
+for (int first = 0; first < num_points; first += kChebyshevMomentBatch) {
+Batch A;
+Batch d;
+Batch half_a_plus_b;
+Batch sqrt_q_plus;
+Batch sqrt_q_minus;
+int tail = kMinTail;
+for (int point = 0; point < kChebyshevMomentBatch; ++point) {
+
+const int kl = std::min(first + point, num_points - 1);
+const double b2_kl = b2_sign * b2[kl];
+A[point] = a[kl] + b2_kl + c[kl];
+d[point] = c[kl] - a[kl];
+half_a_plus_b[point] = 0.5 * A[point] + (a[kl] - b2_kl + c[kl]);
+sqrt_q_plus[point] = 2.0 * std::sqrt(c[kl]);
+sqrt_q_minus[point] = 2.0 * std::sqrt(a[kl]);
+
+const double m0 = ComputeT0(a[kl], b2_kl, c[kl]);
+moments(point, 0) = m0;
+
+moments(point, 1) =
+(sqrt_q_plus[point] - sqrt_q_minus[point] - d[point] * m0) / A[point];
+
+const double semi_major = 0.5 *
+(sqrt_q_plus[point] + sqrt_q_minus[point]) /
+std::sqrt(A[point]);
+const double semi_minor = std::sqrt(
+std::max(2.0 * std::sqrt(a[kl] * c[kl]) - b2_kl, 0.0) / A[point]);
+const double log_rho = std::log(semi_major + semi_minor);
+int tail_kl = kMaxTail;
+if (log_rho > 0.0) {
+tail_kl = static_cast<int>(
+std::min(static_cast<double>(kMaxTail),
+std::ceil(kMinBoundaryLogDecay / log_rho)));
+}
+tail = std::max(tail, tail_kl);
+}
+
+const int k_top = kL + tail;
+for (int k = 2; k <= k_top; ++k) {
+const double sign = (k % 2 == 0) ? 1.0 : -1.0;
+const Batch sub2 = A * factor_sub2[k];
+const Batch sub1 = d * factor_sub1[k] - upper1.col(k - 2) * sub2;
+const Batch inverse_pivot =
+(half_a_plus_b - A * factor_diag[k] - upper2.col(k - 2) * sub2 -
+upper1.col(k - 1) * sub1)
+.inverse();
+upper1.col(k) =
+(d * factor_sup1[k] - upper2.col(k - 1) * sub1) * inverse_pivot;
+upper2.col(k) = A * factor_sup2[k] * inverse_pivot;
+moments.col(k) = (-(sqrt_q_plus + sign * sqrt_q_minus) * factor_rhs[k] -
+moments.col(k - 2) * sub2 - moments.col(k - 1) * sub1) *
+inverse_pivot;
+}
+for (int k = k_top + 1; k <= k_top + 2; ++k) {
+const double sign = (k % 2 == 0) ? 1.0 : -1.0;
+moments.col(k) =
+-(sqrt_q_plus.inverse() + sign * sqrt_q_minus.inverse()) *
+factor_rhs[k];
+}
+for (int k = k_top; k >= 2; --k) {
+moments.col(k) -= upper1.col(k) * moments.col(k + 1) +
+upper2.col(k) * moments.col(k + 2);
+}
+
+const int num_in_batch =
+std::min(kChebyshevMomentBatch, num_points - first);
+for (int k = 0; k <= kL; ++k) {
+m_moments[k].segment(first, num_in_batch) =
+moments.col(k).head(num_in_batch);
 }
 }
 }
@@ -13243,8 +13373,7 @@ numSC = mf * (nf + 1);
 numCS = (mf + 1) * nf;
 nzLen = numSC + numCS;
 
-cmn.resize((1 + nf + mf) * (nf + 1) * (mf + 1));
-cmns.resize((1 + nf + mf) * (nf + 1) * (mf + 1));
+chebyshev_coefficients.resize((1 + nf + mf) * (nf + 1) * (mf + 1));
 
 int numLocal = tp_.ztMax - tp_.ztMin;
 
@@ -13265,24 +13394,36 @@ R0m.resize(numLocal);
 Ra1p.resize(numLocal);
 Ra1m.resize(numLocal);
 
-Tl2p.resize(numLocal);
-Tl2m.resize(numLocal);
-Tl1p.resize(numLocal);
-Tl1m.resize(numLocal);
-
-Tlp.resize(mf + nf + 2);
-Tlm.resize(mf + nf + 2);
-for (int fl = 0; fl < mf + nf + 2; ++fl) {
-Tlp[fl].resize(numLocal);
-Tlm[fl].resize(numLocal);
+chebyshev_moments_p.resize(mf + nf + 1);
+chebyshev_moments_m.resize(mf + nf + 1);
+chebyshev_s_moments_p.resize(mf + nf + 1);
+chebyshev_s_moments_m.resize(mf + nf + 1);
+for (int k = 0; k < mf + nf + 1; ++k) {
+chebyshev_moments_p[k].resize(numLocal);
+chebyshev_moments_m[k].resize(numLocal);
+chebyshev_s_moments_p[k].resize(numLocal);
+chebyshev_s_moments_m[k].resize(numLocal);
 }
 
-Slp.resize(mf + nf + 1);
-Slm.resize(mf + nf + 1);
-for (int fl = 0; fl < mf + nf + 1; ++fl) {
-Slp[fl].resize(numLocal);
-Slm[fl].resize(numLocal);
+const int k_max = mf + nf + kMaxTail;
+moment_workspace_.factor_sub2.resize(k_max + 3);
+moment_workspace_.factor_sub1.resize(k_max + 3);
+moment_workspace_.factor_diag.resize(k_max + 3);
+moment_workspace_.factor_sup1.resize(k_max + 3);
+moment_workspace_.factor_sup2.resize(k_max + 3);
+moment_workspace_.factor_rhs.resize(k_max + 3);
+for (int k = 2; k < k_max + 3; ++k) {
+const double kd = k;
+moment_workspace_.factor_sub2[k] = (kd - 2.0) / (4.0 * (kd - 1.0));
+moment_workspace_.factor_sub1[k] = (2.0 * kd - 3.0) / (2.0 * (kd - 1.0));
+moment_workspace_.factor_diag[k] = 1.0 / (2.0 * (kd * kd - 1.0));
+moment_workspace_.factor_sup1[k] = (2.0 * kd + 3.0) / (2.0 * (kd + 1.0));
+moment_workspace_.factor_sup2[k] = (kd + 2.0) / (4.0 * (kd + 1.0));
+moment_workspace_.factor_rhs[k] = 1.0 / (kd * kd - 1.0);
 }
+moment_workspace_.upper1.resize(kChebyshevMomentBatch, k_max + 3);
+moment_workspace_.upper2.resize(kChebyshevMomentBatch, k_max + 3);
+moment_workspace_.moments.resize(kChebyshevMomentBatch, k_max + 3);
 
 const int mnfull = (2 * nf + 1) * (mf + 1);
 bvec_sin.setZero(mnfull);
@@ -13296,62 +13437,55 @@ computeCoefficients();
 }
 
 void SingularIntegrals::computeCoefficients() {
+const int kL = mf + nf;
+const int num_nodes = kL + 1;
 
-cmn.setZero();
+std::vector<double> theta(num_nodes);
+for (int i = 0; i < num_nodes; ++i) {
+theta[i] = (i + 0.5) * std::numbers::pi / num_nodes;
+}
 
+std::vector<double> cmn_values(static_cast<std::size_t>(nf + 1) * (mf + 1) *
+num_nodes);
 for (int n = 0; n < nf + 1; ++n) {
 for (int m = 0; m < mf + 1; ++m) {
-int i_mn = m - n;
-int j_mn = m + n;
-int k_mn = abs(i_mn);
-
-int s_mn = std::max(m, n);
-
-double f1 = 1.0;
-double f2 = 1.0;
-double f3 = 1.0;
-
-for (int i = 1; i <= k_mn; ++i) {
-f1 *= s_mn - i + 1;
-f2 *= i;
-}
-
-int cmnSign = (std::max(0, n - m) % 2 == 0) ? 1 : -1;
-
-for (int l = k_mn; l <= j_mn; l += 2) {
-int lnm = (l * (nf + 1) + n) * (mf + 1) + m;
-
-cmn[lnm] = f1 / (f2 * f3) * cmnSign;
-
-f1 *= (l + 2 + j_mn) * (j_mn - l) * 0.25;
-f2 *= (l + 2 + k_mn) * 0.5;
-f3 *= (l + 2 - k_mn) * 0.5;
-
-cmnSign = -cmnSign;
+for (int i = 0; i < num_nodes; ++i) {
+cmn_values[(n * (mf + 1) + m) * num_nodes + i] =
+EvaluateCmnPolynomial(m, n, std::cos(theta[i]));
 }
 }
 }
 
+chebyshev_coefficients.setZero();
+std::vector<double> p(num_nodes);
 for (int n = 0; n < nf + 1; ++n) {
 for (int m = 0; m < mf + 1; ++m) {
-int n_m_ = n * (mf + 1) + m;
-int n1m_ = (n - 1) * (mf + 1) + m;
-int n_m1 = n * (mf + 1) + (m - 1);
-int n1m1 = (n - 1) * (mf + 1) + (m - 1);
-for (int l = 0; l < 1 + mf + nf; ++l) {
-int ln_m_ = l * (mf + 1) * (nf + 1) + n_m_;
-int ln1m_ = l * (mf + 1) * (nf + 1) + n1m_;
-int ln_m1 = l * (mf + 1) * (nf + 1) + n_m1;
-int ln1m1 = l * (mf + 1) * (nf + 1) + n1m1;
+
+const int n_m_ = (n * (mf + 1) + m) * num_nodes;
+const int n1m_ = ((n - 1) * (mf + 1) + m) * num_nodes;
+const int n_m1 = (n * (mf + 1) + (m - 1)) * num_nodes;
+const int n1m1 = ((n - 1) * (mf + 1) + (m - 1)) * num_nodes;
+for (int i = 0; i < num_nodes; ++i) {
 if (m == 0 && n == 0) {
-cmns[ln_m_] = cmn[ln_m_];
+p[i] = cmn_values[n_m_ + i];
 } else if (m == 0 && n > 0) {
-cmns[ln_m_] = (cmn[ln_m_] + cmn[ln1m_]) / 2;
+p[i] = (cmn_values[n_m_ + i] + cmn_values[n1m_ + i]) / 2;
 } else if (m > 0 && n == 0) {
-cmns[ln_m_] = (cmn[ln_m_] + cmn[ln_m1]) / 2;
+p[i] = (cmn_values[n_m_ + i] + cmn_values[n_m1 + i]) / 2;
 } else {
-cmns[ln_m_] = (cmn[ln_m_] + cmn[ln1m_] + cmn[ln_m1] + cmn[ln1m1]) / 2;
+p[i] = (cmn_values[n_m_ + i] + cmn_values[n1m_ + i] +
+cmn_values[n_m1 + i] + cmn_values[n1m1 + i]) /
+2;
 }
+}
+
+for (int k = 0; k <= m + n; ++k) {
+double sum = 0.0;
+for (int i = 0; i < num_nodes; ++i) {
+sum += p[i] * std::cos(k * theta[i]);
+}
+const int knm = (k * (nf + 1) + n) * (mf + 1) + m;
+chebyshev_coefficients[knm] = (k == 0 ? 1.0 : 2.0) * sum / num_nodes;
 }
 }
 }
@@ -13380,7 +13514,14 @@ void SingularIntegrals::prepareUpdate(
 const Eigen::VectorXd& a, const Eigen::VectorXd& b2,
 const Eigen::VectorXd& c, const Eigen::VectorXd& A,
 const Eigen::VectorXd& B2, const Eigen::VectorXd& C, bool fullUpdate) {
+const int kL = mf + nf;
 int numLocal = tp_.ztMax - tp_.ztMin;
+
+ComputeChebyshevMoments(a, b2, c,  1.0, numLocal, kL,
+moment_workspace_, chebyshev_moments_p);
+ComputeChebyshevMoments(a, b2, c,  -1.0, numLocal, kL,
+moment_workspace_, chebyshev_moments_m);
+
 for (int kl = 0; kl < numLocal; ++kl) {
 
 ap[kl] = a[kl] + b2[kl] + c[kl];
@@ -13410,21 +13551,28 @@ R0m[kl] = (-Am[kl] * ap[kl] * d[kl] / am[kl] - Ap[kl] * d[kl] +
 delta4[kl];
 Ra1p[kl] = Ap[kl] / ap[kl];
 Ra1m[kl] = Am[kl] / am[kl];
+
+const auto s_moments = [&](const std::vector<Eigen::VectorXd>& moments,
+double R0, double R1, double Ra1,
+std::vector<Eigen::VectorXd>& m_s_moments) {
+const double at_plus = -(R0 + R1) / sqrtc2[kl];
+const double at_minus = (R0 - R1) / sqrta2[kl];
+double n_km2 = 0.0;
+double n_km1 = 0.0;
+for (int k = 0; k <= kL; ++k) {
+const double n_k = (k == 0 ? 1.0 : 2.0) * moments[k][kl] + n_km2;
+m_s_moments[k][kl] = R1 * k * 0.5 * (n_k + n_km2) +
+Ra1 * moments[k][kl] + R0 * k * n_km1 + at_plus +
+(k % 2 == 0 ? at_minus : -at_minus);
+n_km2 = n_km1;
+n_km1 = n_k;
 }
-
-const double sqrtap = sqrt(ap[kl]);
-const double sqrtam = sqrt(am[kl]);
-
-const double T0p = log((sqrtap * sqrtc2[kl] + ap[kl] + d[kl]) /
-(sqrtap * sqrta2[kl] - ap[kl] + d[kl])) /
-sqrtap;
-const double T0m = log((sqrtam * sqrtc2[kl] + am[kl] + d[kl]) /
-(sqrtam * sqrta2[kl] - am[kl] + d[kl])) /
-sqrtam;
-
-const int kL = mf + nf;
-ComputeTl(ap[kl], am[kl], d[kl], sqrtc2[kl], sqrta2[kl], T0p, kL, kl, Tlp);
-ComputeTl(am[kl], ap[kl], d[kl], sqrtc2[kl], sqrta2[kl], T0m, kL, kl, Tlm);
+};
+s_moments(chebyshev_moments_p, R0p[kl], R1p[kl], Ra1p[kl],
+chebyshev_s_moments_p);
+s_moments(chebyshev_moments_m, R0m[kl], R1m[kl], Ra1m[kl],
+chebyshev_s_moments_m);
+}
 }
 }
 
@@ -13444,35 +13592,19 @@ grpmn_cos.setZero();
 }
 }
 
-Tl1p.setZero();
-Tl1m.setZero();
-
-int sgn = 1;
-for (int fl = 0; fl < 1 + nf + mf; ++fl) {
-
-if (fullUpdate) {
-for (int kl = tp_.ztMin; kl < tp_.ztMax; ++kl) {
-const int klRel = kl - tp_.ztMin;
-
-Slp[fl][klRel] = (R1p[klRel] * fl + Ra1p[klRel]) * Tlp[fl][klRel] +
-R0p[klRel] * fl * Tl1p[klRel] -
-(R0p[klRel] + R1p[klRel]) / sqrtc2[klRel] +
-sgn * (R0p[klRel] - R1p[klRel]) / sqrta2[klRel];
-Slm[fl][klRel] = (R1m[klRel] * fl + Ra1m[klRel]) * Tlm[fl][klRel] +
-R0m[klRel] * fl * Tl1m[klRel] -
-(R0m[klRel] + R1m[klRel]) / sqrtc2[klRel] +
-sgn * (R0m[klRel] - R1m[klRel]) / sqrta2[klRel];
-}
-}
-
+for (int order = 0; order < 1 + nf + mf; ++order) {
 for (int n = 0; n < nf + 1; ++n) {
 for (int m = 0; m < mf + 1; ++m) {
 const int idx_m_posn = (nf + n) * (mf + 1) + m;
 const int idx_m_negn = (nf - n) * (mf + 1) + m;
 
-const int idx_lnm = (fl * (nf + 1) + n) * (mf + 1) + m;
-const double cmns_factor =
-cmns[idx_lnm] / (fb_.mscale[m] * fb_.nscale[n]);
+if (order > m + n) {
+continue;
+}
+
+const int idx_knm = (order * (nf + 1) + n) * (mf + 1) + m;
+const double gamma_factor =
+chebyshev_coefficients[idx_knm] / (fb_.mscale[m] * fb_.nscale[n]);
 
 if (n == 0 || m == 0) {
 
@@ -13488,13 +13620,16 @@ const int idx_nk = n * s_.nZeta + k;
 
 const double sinp = (sgnmu * fb_.sinmu[idx_lm] * fb_.cosnv[idx_nk] -
 fb_.cosmu[idx_lm] * fb_.sinnv[idx_nk]) *
-cmns_factor;
+gamma_factor;
 
-bvec_sin[idx_m_posn] += (Tlp[fl][klRel] + Tlm[fl][klRel]) *
+bvec_sin[idx_m_posn] += (chebyshev_moments_p[order][klRel] +
+chebyshev_moments_m[order][klRel]) *
 bDotN[klRel] * s_.wInt[l] * sinp;
 if (fullUpdate) {
 grpmn_sin[idx_m_posn * numLocal + klRel] +=
-(Slp[fl][klRel] + Slm[fl][klRel]) * sinp;
+(chebyshev_s_moments_p[order][klRel] +
+chebyshev_s_moments_m[order][klRel]) *
+sinp;
 }
 
 if (s_.lasym) {
@@ -13502,13 +13637,16 @@ if (s_.lasym) {
 const double cosp =
 (fb_.cosmu[idx_lm] * fb_.cosnv[idx_nk] +
 sgnmu * fb_.sinmu[idx_lm] * fb_.sinnv[idx_nk]) *
-cmns_factor;
+gamma_factor;
 
-bvec_cos[idx_m_posn] += (Tlp[fl][klRel] + Tlm[fl][klRel]) *
+bvec_cos[idx_m_posn] += (chebyshev_moments_p[order][klRel] +
+chebyshev_moments_m[order][klRel]) *
 bDotN[klRel] * s_.wInt[l] * cosp;
 if (fullUpdate) {
 grpmn_cos[idx_m_posn * numLocal + klRel] +=
-(Slp[fl][klRel] + Slm[fl][klRel]) * cosp;
+(chebyshev_s_moments_p[order][klRel] +
+chebyshev_s_moments_m[order][klRel]) *
+cosp;
 }
 }
 }
@@ -13524,8 +13662,8 @@ const double sgnmu = (l < s_.nThetaReduced) ? 1.0 : -1.0;
 const int idx_lm = lr * (s_.mnyq2 + 1) + m;
 const int remaining = std::min(s_.nZeta - k, tp_.ztMax - kl);
 
-const double coeff1 = sgnmu * fb_.sinmu[idx_lm] * cmns_factor;
-const double coeff2 = fb_.cosmu[idx_lm] * cmns_factor;
+const double coeff1 = sgnmu * fb_.sinmu[idx_lm] * gamma_factor;
+const double coeff2 = fb_.cosmu[idx_lm] * gamma_factor;
 
 std::array<double, 4> buf_m_posn{};
 std::array<double, 4> buf_m_negn{};
@@ -13550,10 +13688,14 @@ coeff2 * fb_.sinnv[idx_nk + 2];
 const double sinp3 = coeff1 * fb_.cosnv[idx_nk + 3] -
 coeff2 * fb_.sinnv[idx_nk + 3];
 
-buf_m_posn[0] += Tlm[fl][klRel + 0] * c0 * sinp0;
-buf_m_posn[1] += Tlm[fl][klRel + 1] * c1 * sinp1;
-buf_m_posn[2] += Tlm[fl][klRel + 2] * c2 * sinp2;
-buf_m_posn[3] += Tlm[fl][klRel + 3] * c3 * sinp3;
+buf_m_posn[0] +=
+chebyshev_moments_m[order][klRel + 0] * c0 * sinp0;
+buf_m_posn[1] +=
+chebyshev_moments_m[order][klRel + 1] * c1 * sinp1;
+buf_m_posn[2] +=
+chebyshev_moments_m[order][klRel + 2] * c2 * sinp2;
+buf_m_posn[3] +=
+chebyshev_moments_m[order][klRel + 3] * c3 * sinp3;
 
 const double sinm0 = coeff1 * fb_.cosnv[idx_nk + 0] +
 coeff2 * fb_.sinnv[idx_nk + 0];
@@ -13564,29 +13706,33 @@ coeff2 * fb_.sinnv[idx_nk + 2];
 const double sinm3 = coeff1 * fb_.cosnv[idx_nk + 3] +
 coeff2 * fb_.sinnv[idx_nk + 3];
 
-buf_m_negn[0] += Tlp[fl][klRel + 0] * c0 * sinm0;
-buf_m_negn[1] += Tlp[fl][klRel + 1] * c1 * sinm1;
-buf_m_negn[2] += Tlp[fl][klRel + 2] * c2 * sinm2;
-buf_m_negn[3] += Tlp[fl][klRel + 3] * c3 * sinm3;
+buf_m_negn[0] +=
+chebyshev_moments_p[order][klRel + 0] * c0 * sinm0;
+buf_m_negn[1] +=
+chebyshev_moments_p[order][klRel + 1] * c1 * sinm1;
+buf_m_negn[2] +=
+chebyshev_moments_p[order][klRel + 2] * c2 * sinm2;
+buf_m_negn[3] +=
+chebyshev_moments_p[order][klRel + 3] * c3 * sinm3;
 
 if (fullUpdate) {
 grpmn_sin[idx_m_posn * numLocal + klRel + 0] +=
-Slm[fl][klRel + 0] * sinp0;
+chebyshev_s_moments_m[order][klRel + 0] * sinp0;
 grpmn_sin[idx_m_posn * numLocal + klRel + 1] +=
-Slm[fl][klRel + 1] * sinp1;
+chebyshev_s_moments_m[order][klRel + 1] * sinp1;
 grpmn_sin[idx_m_posn * numLocal + klRel + 2] +=
-Slm[fl][klRel + 2] * sinp2;
+chebyshev_s_moments_m[order][klRel + 2] * sinp2;
 grpmn_sin[idx_m_posn * numLocal + klRel + 3] +=
-Slm[fl][klRel + 3] * sinp3;
+chebyshev_s_moments_m[order][klRel + 3] * sinp3;
 
 grpmn_sin[idx_m_negn * numLocal + klRel + 0] +=
-Slp[fl][klRel + 0] * sinm0;
+chebyshev_s_moments_p[order][klRel + 0] * sinm0;
 grpmn_sin[idx_m_negn * numLocal + klRel + 1] +=
-Slp[fl][klRel + 1] * sinm1;
+chebyshev_s_moments_p[order][klRel + 1] * sinm1;
 grpmn_sin[idx_m_negn * numLocal + klRel + 2] +=
-Slp[fl][klRel + 2] * sinm2;
+chebyshev_s_moments_p[order][klRel + 2] * sinm2;
 grpmn_sin[idx_m_negn * numLocal + klRel + 3] +=
-Slp[fl][klRel + 3] * sinm3;
+chebyshev_s_moments_p[order][klRel + 3] * sinm3;
 }
 }
 
@@ -13601,24 +13747,26 @@ for (; i < remaining; ++i, ++k, ++kl) {
 const int klRel = kl - tp_.ztMin;
 const int idx_nk = n * s_.nZeta + k;
 
-const double coeff1 =
-sgnmu * fb_.sinmu[idx_lm] * fb_.cosnv[idx_nk] * cmns_factor;
+const double coeff1 = sgnmu * fb_.sinmu[idx_lm] *
+fb_.cosnv[idx_nk] * gamma_factor;
 const double coeff2 =
-fb_.cosmu[idx_lm] * fb_.sinnv[idx_nk] * cmns_factor;
+fb_.cosmu[idx_lm] * fb_.sinnv[idx_nk] * gamma_factor;
 
 const double sinm = coeff1 + coeff2;
 
 const double sinp = coeff1 - coeff2;
 
 const double c = bDotN[klRel] * s_.wInt[l];
-bvec_sin[idx_m_posn] += Tlm[fl][klRel] * c * sinp;
-bvec_sin[idx_m_negn] += Tlp[fl][klRel] * c * sinm;
+bvec_sin[idx_m_posn] +=
+chebyshev_moments_m[order][klRel] * c * sinp;
+bvec_sin[idx_m_negn] +=
+chebyshev_moments_p[order][klRel] * c * sinm;
 
 if (fullUpdate) {
 grpmn_sin[idx_m_posn * numLocal + klRel] +=
-Slm[fl][klRel] * sinp;
+chebyshev_s_moments_m[order][klRel] * sinp;
 grpmn_sin[idx_m_negn * numLocal + klRel] +=
-Slp[fl][klRel] * sinm;
+chebyshev_s_moments_p[order][klRel] * sinm;
 }
 }
 }
@@ -13638,23 +13786,23 @@ const int idx_lm = lr * (s_.mnyq2 + 1) + m;
 const int idx_nk = n * s_.nZeta + k;
 
 const double coeff1 =
-fb_.cosmu[idx_lm] * fb_.cosnv[idx_nk] * cmns_factor;
+fb_.cosmu[idx_lm] * fb_.cosnv[idx_nk] * gamma_factor;
 const double coeff2 =
-sgnmu * fb_.sinmu[idx_lm] * fb_.sinnv[idx_nk] * cmns_factor;
+sgnmu * fb_.sinmu[idx_lm] * fb_.sinnv[idx_nk] * gamma_factor;
 
 const double cosm = coeff1 - coeff2;
 
 const double cosp = coeff1 + coeff2;
 
-bvec_cos[idx_m_posn] +=
-Tlm[fl][klRel] * bDotN[klRel] * s_.wInt[l] * cosp;
-bvec_cos[idx_m_negn] +=
-Tlp[fl][klRel] * bDotN[klRel] * s_.wInt[l] * cosm;
+bvec_cos[idx_m_posn] += chebyshev_moments_m[order][klRel] *
+bDotN[klRel] * s_.wInt[l] * cosp;
+bvec_cos[idx_m_negn] += chebyshev_moments_p[order][klRel] *
+bDotN[klRel] * s_.wInt[l] * cosm;
 if (fullUpdate) {
 grpmn_cos[idx_m_posn * numLocal + klRel] +=
-Slm[fl][klRel] * cosp;
+chebyshev_s_moments_m[order][klRel] * cosp;
 grpmn_cos[idx_m_negn * numLocal + klRel] +=
-Slp[fl][klRel] * cosm;
+chebyshev_s_moments_p[order][klRel] * cosm;
 }
 }
 }
@@ -13662,11 +13810,6 @@ Slp[fl][klRel] * cosm;
 }
 }
 
-sgn = -sgn;
-for (int kl = 0; kl < numLocal; ++kl) {
-Tl1p[kl] = Tlp[fl][kl];
-Tl1m[kl] = Tlm[fl][kl];
-}
 }
 }
 
