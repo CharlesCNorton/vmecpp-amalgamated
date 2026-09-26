@@ -17,7 +17,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-20-gd66698e9
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-22-gac28bf48
 //
 // Scope matches vmecpp_amalgamated.cc exactly: the whole solver, fixed and
 // free boundary, every profile parameterization, the complete output suite and
@@ -9267,7 +9267,7 @@ nstep = 10;
 aphi.resize(1);
 aphi[0] = 1.0;
 delt = 1.0;
-tcon0 = 1.0;
+tcon0 = 0.5;
 lforbal = false;
 iteration_style = IterationStyle::VMEC_8_52;
 return_outputs_even_if_not_converged = false;
@@ -29869,6 +29869,18 @@ if (s.lthreed) {
 rmns1[mn] = -t1 * m_vmec_internal_results.rmncs(idx_fc);
 }
 
+}
+
+if (s.lthreed && jF == 0) {
+int mn = -1;
+for (int n = 0; n <= s.ntor; ++n) {
+mn++;
+const int idx_ns_1 = (1 * (s.ntor + 1) + n) * s.mpol + m_0;
+const int idx_ns_2 = (2 * (s.ntor + 1) + n) * s.mpol + m_0;
+const double t1 = t.mscale[m_0] * t.nscale[n];
+lmnc1[mn] = t1 * (2.0 * m_vmec_internal_results.lmncc(idx_ns_1) -
+m_vmec_internal_results.lmncc(idx_ns_2));
+}
 }
 
 for (int m = 1; m < s.mpol; ++m) {
