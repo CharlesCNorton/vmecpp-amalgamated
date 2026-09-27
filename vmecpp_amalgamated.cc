@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-22-gac28bf48
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-28-gc8dece5b
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -4645,7 +4645,8 @@ std::array<Vector3d, 3> OrthonormalFrameAroundAxis(const Vector3d& axis) {
   orthonormal_frame[0] = ScaleTo(axis, 1.0);
 
   // Obtain second axis, fully perpendicular to `axis`,
-  // by subtracting the projection onto `axis` from the most perpendicular axis.
+  // by subtracting the projection onto `axis` from the most perpendicular axis
+  // and scaling the difference to unit length.
   // The reasoning is that by using the most perpendicular axis,
   // the least amount of catastrophic cancellation will happen.
 
@@ -4655,8 +4656,8 @@ std::array<Vector3d, 3> OrthonormalFrameAroundAxis(const Vector3d& axis) {
   const double axis_dot_most_perp =
       DotProduct(orthonormal_frame[0], most_perpendicular_axis);
   orthonormal_frame[1] =
-      Add(most_perpendicular_axis,
-          ScaleTo(orthonormal_frame[0], -axis_dot_most_perp));
+      Normalize(Add(most_perpendicular_axis,
+                    ScaleTo(orthonormal_frame[0], -axis_dot_most_perp)));
 
   // third axis is found from cross product of other two axes
   orthonormal_frame[2] =
@@ -11842,6 +11843,37 @@ absl::Status CheckProfile(const std::string& type_key,
 
   return absl::OkStatus();
 }
+
+// First coefficient of the 'rational' denominator, matching evalRational.
+static constexpr Eigen::VectorXd::Index kRationalDenominatorStart = 10;
+
+// Checks that a 'rational' profile carries a denominator. evalRational reads
+// coefficients 0 to 9 as the numerator and 10 and above as the denominator, and
+// returns DBL_MAX at every s when the denominator evaluates to zero, so an
+// array of ten or fewer coefficients reaches the solver as an unbounded
+// profile.
+absl::Status CheckRationalProfile(const std::string& type_key,
+                                  const std::string& type_name,
+                                  const std::string& coefficient_key,
+                                  const Eigen::VectorXd& coefficients) {
+  if (type_name != "rational") {
+    return absl::OkStatus();
+  }
+
+  for (Eigen::VectorXd::Index i = kRationalDenominatorStart;
+       i < coefficients.size(); ++i) {
+    if (coefficients[i] != 0.0) {
+      return absl::OkStatus();
+    }
+  }
+
+  return absl::InvalidArgumentError(absl::StrFormat(
+      "input variable '%s' is 'rational', whose denominator is '%s' from index "
+      "%d on, but '%s' has %d coefficients and none past index %d is "
+      "non-zero\n",
+      type_key, coefficient_key, kRationalDenominatorStart, coefficient_key,
+      coefficients.size(), kRationalDenominatorStart - 1));
+}
 }  // namespace
 
 namespace vmecpp {
@@ -13231,6 +13263,12 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
     return status;
   }
 
+  if (absl::Status status = CheckRationalProfile(
+          "pmass_type", vmec_indata.pmass_type, "am", vmec_indata.am);
+      !status.ok()) {
+    return status;
+  }
+
   // pres_scale
   if (vmec_indata.pres_scale < 0) {
     return absl::InvalidArgumentError(absl::StrFormat(
@@ -13263,10 +13301,22 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
     return status;
   }
 
+  if (absl::Status status = CheckRationalProfile(
+          "piota_type", vmec_indata.piota_type, "ai", vmec_indata.ai);
+      !status.ok()) {
+    return status;
+  }
+
   // pcurr_type, ac_aux_s, ac_aux_f. Ignored for ncurr == 0, still checked.
   if (absl::Status status = CheckProfile(
           "pcurr_type", vmec_indata.pcurr_type, ProfileType::CURRENT, "ac",
           vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
+      !status.ok()) {
+    return status;
+  }
+
+  if (absl::Status status = CheckRationalProfile(
+          "pcurr_type", vmec_indata.pcurr_type, "ac", vmec_indata.ac);
       !status.ok()) {
     return status;
   }
@@ -15287,6 +15337,46 @@ absl::Status MGridProvider::LoadFile(const std::filesystem::path& filename,
   if (!read_status.ok()) {
     nc_close(ncid);
     return with_context(read_status);
+  }
+
+  // the grid and the coil count size everything below, so they are held to
+  // what IsValidMakegridParameters requires of a grid
+  absl::Status header_status;
+  if (*nfp_or < 1) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("nfp must be > 0, but is %d", *nfp_or)));
+  }
+  if (*nextcur_or < 1) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("nextcur must be > 0, but is %d", *nextcur_or)));
+  }
+  if (*num_r_or < 2) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("ir must be > 1, but is %d", *num_r_or)));
+  }
+  if (*num_z_or < 2) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("jz must be > 1, but is %d", *num_z_or)));
+  }
+  if (*num_phi_or < 1) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("kp must be > 0, but is %d", *num_phi_or)));
+  }
+  if (*max_r_or <= *min_r_or) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("R grid extent must be positive, but is from rmin = "
+                        "% .3e to rmax = % .3e",
+                        *min_r_or, *max_r_or)));
+  }
+  if (*max_z_or <= *min_z_or) {
+    header_status.Update(absl::InvalidArgumentError(
+        absl::StrFormat("Z grid extent must be positive, but is from zmin = "
+                        "% .3e to zmax = % .3e",
+                        *min_z_or, *max_z_or)));
+  }
+  if (!header_status.ok()) {
+    nc_close(ncid);
+    return with_context(header_status);
   }
 
   nfp = *nfp_or;
@@ -27118,16 +27208,6 @@ absl::StatusOr<bool> IdealMhdModel::update(
       }
 
       if (r_.nsMaxF1 == m_fc_.ns) {
-        // MUST NOT BREAK TRI-DIAGONAL RADIAL COUPLING: OFFENDS PRECONDITIONER!
-        // double edgePressure = 1.5 * p.presH[r.nsMaxH-1 - r.nsMinH] - 0.5 *
-        // p.presH[r.nsMinH - r.nsMinH];
-        double edgePressure =
-            m_p_.evalMassProfile((m_fc_.ns - 1.5) / (m_fc_.ns - 1.0));
-        if (edgePressure != 0.0) {
-          edgePressure = m_p_.evalMassProfile(1.0) / edgePressure *
-                         m_p_.presH[r_.nsMaxH - 1 - r_.nsMinH];
-        }
-
         for (int kl = 0; kl < s_.nZnT; ++kl) {
           // extrapolate total pressure (from inside) to LCFS; this is
           // bsqsav(:,3) in Fortran VMEC
@@ -27135,15 +27215,16 @@ absl::StatusOr<bool> IdealMhdModel::update(
               1.5 * totalPressure[(r_.nsMaxH - 1 - r_.nsMinH) * s_.nZnT + kl] -
               0.5 * totalPressure[(r_.nsMaxH - 2 - r_.nsMinH) * s_.nZnT + kl];
 
-          // net pressure from outside on LCFS
+          // total pressure from outside on LCFS: the vacuum carries no kinetic
+          // pressure, so the boundary settles where B_vac^2/2 = p + B^2/2
           // FIXME(eguiraud) slow loop over Nestor output
           // NOTE: here is the interface between the fast-toroidal setup in
           // Nestor and fast-poloidal setup in VMEC
           const int k = kl / s_.nThetaEff;
           const int l = kl % s_.nThetaEff;
           const int idx_lk = l * s_.nZeta + k;
-          double outsideEdgePressure =
-              m_h_.vacuum_magnetic_pressure[idx_lk] + edgePressure;
+          const double outsideEdgePressure =
+              m_h_.vacuum_magnetic_pressure[idx_lk];
 
           // term to enter MHD forces
           int idx_kl = (r_.nsMaxF1 - 1 - r_.nsMinF1) * s_.nZnT + kl;
@@ -30885,6 +30966,34 @@ VectorXd NonEmptyVectorOr(const Eigen::VectorXd& vec, const double val) {
     return VectorXd::Constant(1, val);
   }
 }  // NonEmptyVectorOr
+
+// Fill the axis and the boundary column of a Fourier coefficient stored as one
+// row of ns full-grid columns per mode, reading interior columns only. The
+// axis column is written for m <= 1 and left at zero otherwise. At ns == 3 the
+// axis column is also the third-from-last column, and the single interior
+// column supplies both ends.
+void ExtrapolateFullGridEnds(int ns, const Eigen::VectorXi& xm,
+                             vmecpp::RowMatrixXd& m_coefficients) {
+  const int num_modes = static_cast<int>(m_coefficients.rows());
+  for (int mn = 0; mn < num_modes; ++mn) {
+    if (ns < 4) {
+      const double interior = m_coefficients(mn, 1);
+      if (xm[mn] <= 1) {
+        m_coefficients(mn, 0) = interior;
+      }
+      m_coefficients(mn, ns - 1) = interior;
+      continue;
+    }
+
+    const double axis = 2.0 * m_coefficients(mn, 1) - m_coefficients(mn, 2);
+    const double boundary =
+        2.0 * m_coefficients(mn, ns - 2) - m_coefficients(mn, ns - 3);
+    if (xm[mn] <= 1) {
+      m_coefficients(mn, 0) = axis;
+    }
+    m_coefficients(mn, ns - 1) = boundary;
+  }  // mn
+}  // ExtrapolateFullGridEnds
 }  // namespace
 
 // Shorthands for the calls required to read/write data members from/to HDF5
@@ -36539,44 +36648,17 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
     }  // j_f
 
     // Axis (j_f=0): extrapolate for m <= 1, zero for m > 1
-    for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-      if (wout.xm_nyq[mn] <= 1) {
-        wout.currumnc(mn, 0) =
-            2.0 * wout.currumnc(mn, 1) - wout.currumnc(mn, 2);
-        wout.currvmnc(mn, 0) =
-            2.0 * wout.currvmnc(mn, 1) - wout.currvmnc(mn, 2);
-      }
-      // m > 1: already zero from initialization
-    }
-
     // Edge (j_f=ns-1): linear extrapolation
-    for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-      wout.currumnc(mn, fc.ns - 1) =
-          2.0 * wout.currumnc(mn, fc.ns - 2) - wout.currumnc(mn, fc.ns - 3);
-      wout.currvmnc(mn, fc.ns - 1) =
-          2.0 * wout.currvmnc(mn, fc.ns - 2) - wout.currvmnc(mn, fc.ns - 3);
-    }
+    ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currumnc);
+    ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currvmnc);
 
     // Divide by mu_0 to convert to SI units (Amperes)
     wout.currumnc /= MU_0;
     wout.currvmnc /= MU_0;
 
     if (s.lasym) {
-      for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-        if (wout.xm_nyq[mn] <= 1) {
-          wout.currumns(mn, 0) =
-              2.0 * wout.currumns(mn, 1) - wout.currumns(mn, 2);
-          wout.currvmns(mn, 0) =
-              2.0 * wout.currvmns(mn, 1) - wout.currvmns(mn, 2);
-        }
-      }
-
-      for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-        wout.currumns(mn, fc.ns - 1) =
-            2.0 * wout.currumns(mn, fc.ns - 2) - wout.currumns(mn, fc.ns - 3);
-        wout.currvmns(mn, fc.ns - 1) =
-            2.0 * wout.currvmns(mn, fc.ns - 2) - wout.currvmns(mn, fc.ns - 3);
-      }
+      ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currumns);
+      ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currvmns);
 
       wout.currumns /= MU_0;
       wout.currvmns /= MU_0;

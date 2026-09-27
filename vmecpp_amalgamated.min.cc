@@ -17,7 +17,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-22-gac28bf48
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-28-gc8dece5b
 //
 // Scope matches vmecpp_amalgamated.cc exactly: the whole solver, fixed and
 // free boundary, every profile parameterization, the complete output suite and
@@ -3430,8 +3430,8 @@ MostPerpendicularCoordinateAxis(axis);
 const double axis_dot_most_perp =
 DotProduct(orthonormal_frame[0], most_perpendicular_axis);
 orthonormal_frame[1] =
-Add(most_perpendicular_axis,
-ScaleTo(orthonormal_frame[0], -axis_dot_most_perp));
+Normalize(Add(most_perpendicular_axis,
+ScaleTo(orthonormal_frame[0], -axis_dot_most_perp)));
 
 orthonormal_frame[2] =
 CrossProduct(orthonormal_frame[0], orthonormal_frame[1]);
@@ -9144,6 +9144,31 @@ aux_key, aux_key, aux_s.size(), aux_f.size()));
 
 return absl::OkStatus();
 }
+
+static constexpr Eigen::VectorXd::Index kRationalDenominatorStart = 10;
+
+absl::Status CheckRationalProfile(const std::string& type_key,
+const std::string& type_name,
+const std::string& coefficient_key,
+const Eigen::VectorXd& coefficients) {
+if (type_name != "rational") {
+return absl::OkStatus();
+}
+
+for (Eigen::VectorXd::Index i = kRationalDenominatorStart;
+i < coefficients.size(); ++i) {
+if (coefficients[i] != 0.0) {
+return absl::OkStatus();
+}
+}
+
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable '%s' is 'rational', whose denominator is '%s' from index "
+"%d on, but '%s' has %d coefficients and none past index %d is "
+"non-zero\n",
+type_key, coefficient_key, kRationalDenominatorStart, coefficient_key,
+coefficients.size(), kRationalDenominatorStart - 1));
+}
 }
 
 namespace vmecpp {
@@ -10429,6 +10454,12 @@ vmec_indata.am_aux_s, vmec_indata.am_aux_f);
 return status;
 }
 
+if (absl::Status status = CheckRationalProfile(
+"pmass_type", vmec_indata.pmass_type, "am", vmec_indata.am);
+!status.ok()) {
+return status;
+}
+
 if (vmec_indata.pres_scale < 0) {
 return absl::InvalidArgumentError(absl::StrFormat(
 "input variable 'pres_scale' must be positive, but was %g\n",
@@ -10453,9 +10484,21 @@ CheckProfile("piota_type", vmec_indata.piota_type, ProfileType::IOTA,
 return status;
 }
 
+if (absl::Status status = CheckRationalProfile(
+"piota_type", vmec_indata.piota_type, "ai", vmec_indata.ai);
+!status.ok()) {
+return status;
+}
+
 if (absl::Status status = CheckProfile(
 "pcurr_type", vmec_indata.pcurr_type, ProfileType::CURRENT, "ac",
 vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
+!status.ok()) {
+return status;
+}
+
+if (absl::Status status = CheckRationalProfile(
+"pcurr_type", vmec_indata.pcurr_type, "ac", vmec_indata.ac);
 !status.ok()) {
 return status;
 }
@@ -12052,6 +12095,44 @@ read_status.Update(mgrid_mode_or.status());
 if (!read_status.ok()) {
 nc_close(ncid);
 return with_context(read_status);
+}
+
+absl::Status header_status;
+if (*nfp_or < 1) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("nfp must be > 0, but is %d", *nfp_or)));
+}
+if (*nextcur_or < 1) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("nextcur must be > 0, but is %d", *nextcur_or)));
+}
+if (*num_r_or < 2) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("ir must be > 1, but is %d", *num_r_or)));
+}
+if (*num_z_or < 2) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("jz must be > 1, but is %d", *num_z_or)));
+}
+if (*num_phi_or < 1) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("kp must be > 0, but is %d", *num_phi_or)));
+}
+if (*max_r_or <= *min_r_or) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("R grid extent must be positive, but is from rmin = "
+"% .3e to rmax = % .3e",
+*min_r_or, *max_r_or)));
+}
+if (*max_z_or <= *min_z_or) {
+header_status.Update(absl::InvalidArgumentError(
+absl::StrFormat("Z grid extent must be positive, but is from zmin = "
+"% .3e to zmax = % .3e",
+*min_z_or, *max_z_or)));
+}
+if (!header_status.ok()) {
+nc_close(ncid);
+return with_context(header_status);
 }
 
 nfp = *nfp_or;
@@ -21818,14 +21899,6 @@ m_need_restart = false;
 }
 
 if (r_.nsMaxF1 == m_fc_.ns) {
-
-double edgePressure =
-m_p_.evalMassProfile((m_fc_.ns - 1.5) / (m_fc_.ns - 1.0));
-if (edgePressure != 0.0) {
-edgePressure = m_p_.evalMassProfile(1.0) / edgePressure *
-m_p_.presH[r_.nsMaxH - 1 - r_.nsMinH];
-}
-
 for (int kl = 0; kl < s_.nZnT; ++kl) {
 
 insideTotalPressure[kl] =
@@ -21835,8 +21908,8 @@ insideTotalPressure[kl] =
 const int k = kl / s_.nThetaEff;
 const int l = kl % s_.nThetaEff;
 const int idx_lk = l * s_.nZeta + k;
-double outsideEdgePressure =
-m_h_.vacuum_magnetic_pressure[idx_lk] + edgePressure;
+const double outsideEdgePressure =
+m_h_.vacuum_magnetic_pressure[idx_lk];
 
 int idx_kl = (r_.nsMaxF1 - 1 - r_.nsMinF1) * s_.nZnT + kl;
 rBSq[kl] = outsideEdgePressure * (r1_e[idx_kl] + r1_o[idx_kl]) /
@@ -24935,6 +25008,29 @@ if (vec.size() > 0) {
 return vec;
 } else {
 return VectorXd::Constant(1, val);
+}
+}
+
+void ExtrapolateFullGridEnds(int ns, const Eigen::VectorXi& xm,
+vmecpp::RowMatrixXd& m_coefficients) {
+const int num_modes = static_cast<int>(m_coefficients.rows());
+for (int mn = 0; mn < num_modes; ++mn) {
+if (ns < 4) {
+const double interior = m_coefficients(mn, 1);
+if (xm[mn] <= 1) {
+m_coefficients(mn, 0) = interior;
+}
+m_coefficients(mn, ns - 1) = interior;
+continue;
+}
+
+const double axis = 2.0 * m_coefficients(mn, 1) - m_coefficients(mn, 2);
+const double boundary =
+2.0 * m_coefficients(mn, ns - 2) - m_coefficients(mn, ns - 3);
+if (xm[mn] <= 1) {
+m_coefficients(mn, 0) = axis;
+}
+m_coefficients(mn, ns - 1) = boundary;
 }
 }
 }
@@ -30029,42 +30125,15 @@ wout.currvmns(mn, j_f) = m * t1a + t2a;
 }
 }
 
-for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-if (wout.xm_nyq[mn] <= 1) {
-wout.currumnc(mn, 0) =
-2.0 * wout.currumnc(mn, 1) - wout.currumnc(mn, 2);
-wout.currvmnc(mn, 0) =
-2.0 * wout.currvmnc(mn, 1) - wout.currvmnc(mn, 2);
-}
-
-}
-
-for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-wout.currumnc(mn, fc.ns - 1) =
-2.0 * wout.currumnc(mn, fc.ns - 2) - wout.currumnc(mn, fc.ns - 3);
-wout.currvmnc(mn, fc.ns - 1) =
-2.0 * wout.currvmnc(mn, fc.ns - 2) - wout.currvmnc(mn, fc.ns - 3);
-}
+ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currumnc);
+ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currvmnc);
 
 wout.currumnc /= MU_0;
 wout.currvmnc /= MU_0;
 
 if (s.lasym) {
-for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-if (wout.xm_nyq[mn] <= 1) {
-wout.currumns(mn, 0) =
-2.0 * wout.currumns(mn, 1) - wout.currumns(mn, 2);
-wout.currvmns(mn, 0) =
-2.0 * wout.currvmns(mn, 1) - wout.currvmns(mn, 2);
-}
-}
-
-for (int mn = 0; mn < s.mnmax_nyq; ++mn) {
-wout.currumns(mn, fc.ns - 1) =
-2.0 * wout.currumns(mn, fc.ns - 2) - wout.currumns(mn, fc.ns - 3);
-wout.currvmns(mn, fc.ns - 1) =
-2.0 * wout.currvmns(mn, fc.ns - 2) - wout.currvmns(mn, fc.ns - 3);
-}
+ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currumns);
+ExtrapolateFullGridEnds(fc.ns, wout.xm_nyq, wout.currvmns);
 
 wout.currumns /= MU_0;
 wout.currvmns /= MU_0;
