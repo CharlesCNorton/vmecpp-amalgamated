@@ -25,6 +25,12 @@ abscab  -  https://github.com/jonathanschilling/abscab-cpp
     inlined unmodified. A copy of the Apache License 2.0 is at
     THIRD_PARTY_LICENSES/abscab-Apache-2.0.txt.
 
+Pull request discussions  -  https://github.com/proximafusion/vmecpp/pulls
+    vmecpp_unmerged_prs.txt reproduces the titles, descriptions, comments and
+    reviews of the repository's open and unmerged closed pull requests as
+    posted on GitHub. Each post remains the work of its author and is not
+    covered by the licenses above.
+
 Build-time dependencies, fetched or found at build time and not redistributed
 in this repository: Eigen, abseil-cpp, nlohmann/json, HDF5, NetCDF, OpenMP.
 Each remains under its own license.

@@ -11,6 +11,15 @@ around 30% fewer tokens, for reading the whole solver in one pass under a contex
 budget. It keeps the `// source:` and `// header:` markers, so any region maps
 back to the commented layer for the prose on that routine.
 
+`vmecpp_unmerged_prs.txt` holds every VMEC++ pull request that is open or was
+closed without merging, each with its title, description, files changed and
+whole conversation, meaning comments, review verdicts and inline review
+comments, without the diffs. Read with the amalgamation, it gives the current
+code together with everything proposed against it and not merged: fixes already
+waiting in open pull requests, and approaches tried and abandoned. The changes
+of merged pull requests are in the amalgamation itself, and those pull requests
+are not listed.
+
 This is an unofficial redistribution and is not affiliated with or endorsed by
 Proxima Fusion.
 
@@ -83,13 +92,22 @@ python amalgamate.py \
     --cpp-root vmecpp/src/vmecpp/cpp \
     --abscab-root abscab-cpp \
     --out vmecpp_amalgamated.cc \
-    --min-out vmecpp_amalgamated.min.cc
+    --min-out vmecpp_amalgamated.min.cc \
+    --prs-out vmecpp_unmerged_prs.txt
 ```
 
 `--min-out` writes the stripped layer from the same assembled text. Its comment
 removal scans string and character literals, so a `//` or `/*` inside one
 survives; a block comment becomes one space, which cannot weld two tokens
 together, and the trailing backslash of a macro continuation is kept.
+
+`--prs-out` writes the pull request digest from the GitHub API at the time of
+the run, so every regeneration of the amalgamation refreshes it. It needs a
+token from `GITHUB_TOKEN` or `GH_TOKEN`, or a logged-in `gh`. Posts are kept as
+GitHub displays them, except that HTML comments are removed, a Graphite stack
+notice is reduced to the stack, a benchmark alert to its measurements, and a
+clang-tidy diagnostic to its message. Paths under `src/vmecpp/cpp/` are given
+relative to it, as the amalgamation's markers give them.
 
 ## Verification
 
