@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-28-gc8dece5b
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-36-g5f4045db
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -22682,10 +22682,15 @@ inline int LocalForceWorkSize(const LocalForceComposition& c) {
   return n;
 }
 
-// work must hold LocalForceWorkSize(*c) doubles.
-inline void ComputeLocalForceDensity(const double* geom, double* work,
-                                     double* force,
-                                     const LocalForceComposition* c) {
+// ComputeLocalForceDensity with the half-grid profiles passed explicitly
+// instead of read from c->presH, c->chipH and c->currH, so that a reverse pass
+// can mark them active.
+inline void ComputeLocalForceDensityWithProfiles(const double* geom,
+                                                 double* work, double* force,
+                                                 const LocalForceComposition* c,
+                                                 const double* presH,
+                                                 const double* chipH,
+                                                 const double* currH) {
   const int nZnT = c->nZnT;
   const int gS = c->geom_stride;
   const int fS = c->force_stride;
@@ -22753,8 +22758,8 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
     // For a prescribed-current profile (ncurr==1), chi' is recomputed from the
     // geometry each step (constrained toroidal current), so differentiate it
     // here rather than freezing it. For ncurr==0 chi' = iota*phi' is a fixed
-    // profile, so use the frozen c->chipH.
-    double chip = c->chipH[jH - c->nsMinH];
+    // profile, so use the frozen chipH.
+    double chip = chipH[jH - c->nsMinH];
     if (c->ncurr == 1) {
       double jvPlasma = 0.0;
       double avg_guu_gsqrt = 0.0;
@@ -22769,7 +22774,7 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
         avg_guu_gsqrt += guu[ih] / gsqrt[ih] * c->wInt[l];
       }
       if (avg_guu_gsqrt != 0.0) {
-        chip = (c->currH[jH - c->nsMinH] - jvPlasma) / avg_guu_gsqrt;
+        chip = (currH[jH - c->nsMinH] - jvPlasma) / avg_guu_gsqrt;
       }
       // Expose chi' as its own output block so a cotangent seeded there alone
       // yields (dchi'/dx)^T through the same reverse pass as the force
@@ -22785,7 +22790,7 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
   ComputeMagneticPressure(bsupu, bsubu, bsupv, bsubv, nH, tp);
   for (int jH = c->nsMinH; jH < c->nsMaxH; ++jH) {
     for (int kl = 0; kl < nZnT; ++kl)
-      tp[(jH - c->nsMinH) * nZnT + kl] += c->presH[jH - c->nsMinH];
+      tp[(jH - c->nsMinH) * nZnT + kl] += presH[jH - c->nsMinH];
   }
 
   double* P_i = s;
@@ -22991,6 +22996,14 @@ inline void ComputeLocalForceDensity(const double* geom, double* work,
                         brmn_e, brmn_o, bzmn_e, bzmn_o, frcon_e, frcon_o,
                         fzcon_e, fzcon_o);
   }
+}
+
+// work must hold LocalForceWorkSize(*c) doubles.
+inline void ComputeLocalForceDensity(const double* geom, double* work,
+                                     double* force,
+                                     const LocalForceComposition* c) {
+  ComputeLocalForceDensityWithProfiles(geom, work, force, c, c->presH, c->chipH,
+                                       c->currH);
 }
 
 }  // namespace vmecpp
@@ -23311,6 +23324,24 @@ class IdealMhdModel {
   void chipStateVjp(const double* geomP, int geom_stride,
                     const double* chip_bar, FourierGeometry& m_physical_scratch,
                     FourierGeometry& m_decomposed_out);
+
+  // C^T of applyExactForceJacobianTranspose: a decomposed-force cotangent to
+  // the flat force-density cotangent of local_force_composition.h (block 20
+  // zero). Overwrites m_decomposed_in and m_physical_f.
+  std::vector<double> forceDensityCotangentFromDecomposed(
+      FourierForces& m_decomposed_in, FourierForces& m_physical_f,
+      bool fix_m1_gauge);
+
+  // Cotangents of the half-grid profiles presH, chipH and currH (index
+  // jH-nsMinH, zeroed by the caller) at fixed geometry, from a
+  // decomposed-force cotangent m_decomposed_in and a cotangent chip_bar of
+  // the half-grid chi'. With ncurr==1 chip_bar seeds the chi' output of the
+  // composition, which depends on currH; otherwise chi' is chipH itself and
+  // chip_bar adds to m_chipH_bar.
+  void profileVjp(const double* geomP, int geom_stride,
+                  FourierForces& m_decomposed_in, FourierForces& m_physical_f,
+                  const double* chip_bar, double* m_presH_bar,
+                  double* m_chipH_bar, double* m_currH_bar);
 
   // Transposes of the spectral transforms, for the transposed exact Hessian.
   // dft_ForcesToFourierTranspose: (forcesToFourier)^T, decomposed-force coeff
@@ -26403,6 +26434,19 @@ void ExactForceDensityVjp(const double* geom, double* geom_bar, double* work,
                           double* work_bar, double* force, double* force_bar,
                           const LocalForceComposition* c);
 
+// Reverse-mode product of ComputeLocalForceDensity with respect to the
+// half-grid profiles c->presH, c->chipH and c->currH at fixed geometry: given
+// a force-density cotangent in force_bar, accumulates the profile cotangents
+// into presH_bar, chipH_bar and currH_bar (index jH-nsMinH, zeroed by the
+// caller). work/work_bar/force are caller-owned scratch as in
+// ExactForceDensityVjp.
+void ExactForceDensityProfileVjp(const double* geom, double* work,
+                                 double* work_bar, double* force,
+                                 double* force_bar,
+                                 const LocalForceComposition* c,
+                                 double* presH_bar, double* chipH_bar,
+                                 double* currH_bar);
+
 }  // namespace vmecpp
 
 #endif  // VMECPP_VMEC_IDEAL_MHD_MODEL_EXACT_FORCE_VJP_H_
@@ -29402,11 +29446,9 @@ void IdealMhdModel::dft_FourierToRealTranspose_3d_symm(
 }
 
 #ifdef VMECPP_ENABLE_ENZYME
-void IdealMhdModel::applyExactForceJacobianTranspose(
-    const double* geomP, int geom_stride, FourierForces& m_decomposed_in,
-    FourierForces& m_physical_f, FourierGeometry& m_physical_scratch,
-    FourierGeometry& m_decomposed_out, bool fix_m1_gauge) {
-  const int gS = geom_stride;
+std::vector<double> IdealMhdModel::forceDensityCotangentFromDecomposed(
+    FourierForces& m_decomposed_in, FourierForces& m_physical_f,
+    bool fix_m1_gauge) {
   const int nForce = (r_.nsMaxFIncludingLcfs - r_.nsMinF) * s_.nZnT;
 
   // C^T: transpose of [scatter -> forcesToFourier -> decompose -> m1 -> zeroZ].
@@ -29454,6 +29496,16 @@ void IdealMhdModel::applyExactForceJacobianTranspose(
     gather(14, clmn_e);
     gather(15, clmn_o);
   }
+  return force_bar;
+}
+
+void IdealMhdModel::applyExactForceJacobianTranspose(
+    const double* geomP, int geom_stride, FourierForces& m_decomposed_in,
+    FourierForces& m_physical_f, FourierGeometry& m_physical_scratch,
+    FourierGeometry& m_decomposed_out, bool fix_m1_gauge) {
+  const int gS = geom_stride;
+  const std::vector<double> force_bar = forceDensityCotangentFromDecomposed(
+      m_decomposed_in, m_physical_f, fix_m1_gauge);
 
   // J_g^T: reverse-mode force-density kernel.
   std::vector<double> geom_bar(20 * gS, 0.0);
@@ -29579,6 +29631,35 @@ void IdealMhdModel::chipStateVjp(const double* geomP, int geom_stride,
   m_physical_scratch.extrapolateTowardsAxisTranspose();
   m_physical_scratch.m1Constraint(1.0, signOfJacobian);
   m_physical_scratch.decomposeInto(m_decomposed_out, m_p_.scalxc);
+}
+
+void IdealMhdModel::profileVjp(const double* geomP, int geom_stride,
+                               FourierForces& m_decomposed_in,
+                               FourierForces& m_physical_f,
+                               const double* chip_bar, double* m_presH_bar,
+                               double* m_chipH_bar, double* m_currH_bar) {
+  const int nForce = (r_.nsMaxFIncludingLcfs - r_.nsMinF) * s_.nZnT;
+  const int nH = r_.nsMaxH - r_.nsMinH;
+  std::vector<double> force_bar = forceDensityCotangentFromDecomposed(
+      m_decomposed_in, m_physical_f, /*fix_m1_gauge=*/true);
+  if (ncurr == 1) {
+    for (int jH = 0; jH < nH; ++jH) {
+      force_bar[20 * nForce + jH] += chip_bar[jH];
+    }
+  }
+  LocalForceComposition comp = makeLocalForceComposition(geom_stride);
+  const int nWork = LocalForceWorkSize(comp);
+  std::vector<double> work(nWork, 0.0);
+  std::vector<double> work_bar(nWork, 0.0);
+  std::vector<double> force(kLocalForceBlocks * nForce, 0.0);
+  ExactForceDensityProfileVjp(geomP, work.data(), work_bar.data(), force.data(),
+                              force_bar.data(), &comp, m_presH_bar, m_chipH_bar,
+                              m_currH_bar);
+  if (ncurr != 1) {
+    for (int jH = 0; jH < nH; ++jH) {
+      m_chipH_bar[jH] += chip_bar[jH];
+    }
+  }
 }
 
 // Diagnostic: max |composed force density - production force density| at the
@@ -31980,15 +32061,11 @@ absl::Status vmecpp::WOutFileContents::LoadInto(WOutFileContents& m_obj,
   READMEMBER_COMPAT(niter, "maximum_iterations");
   READMEMBER(lfreeb);
   READMEMBER(mgrid_file);
-  // Compatibility with HDF5 files that do not have the nextcur and extcur
-  // fields yet (before v0.3.3)
-  if (m_obj.lfreeb) {
-    READMEMBER(nextcur);
-    READMEMBER(extcur);
-  } else {
-    m_obj.nextcur = 0;
-    m_obj.extcur = Eigen::Vector<double, 0>::Zero();
-  }
+  READMEMBER(extcur);
+  // Files written before v0.3.3 carry no nextcur, the number of extcur
+  // entries.
+  m_obj.nextcur = static_cast<int>(m_obj.extcur.size());
+  READMEMBER_OPTIONAL(nextcur);
   READMEMBER(mgrid_mode);
   READMEMBER(wb);
   READMEMBER(wp);

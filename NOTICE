@@ -9,7 +9,7 @@ Components
 
 VMEC++  -  https://github.com/proximafusion/vmecpp
     MIT License, Copyright (c) 2024-present Proxima Fusion GmbH.
-    Amalgamated from commit c8dece5b (v0.7.5-28-gc8dece5b). The sources are
+    Amalgamated from commit 5f4045db (v0.7.5-36-g5f4045db). The sources are
     inlined with only mechanical transformations: project headers are pasted in
     dependency order, and two optional paths are compiled out, the FFTX/SPIRAL
     transform (guarded by VMECPP_USE_FFTX), which leaves the partial-DFT path
