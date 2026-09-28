@@ -18,8 +18,9 @@ commented layer.
 
 --prs-out additionally writes a digest of every VMEC++ pull request that is open
 or was closed without merging, read from the GitHub API at the time of the run:
-title, description, files changed and the whole conversation, without diffs. It
-needs a token in GITHUB_TOKEN or GH_TOKEN, or a logged-in gh.
+title, description and the whole conversation, without diffs, and with each code
+block in a post replaced by a marker line. It needs a token in GITHUB_TOKEN or
+GH_TOKEN, or a logged-in gh.
 
 Usage:
   python amalgamate.py \
@@ -37,6 +38,7 @@ sources VMEC++ pins with:
 """
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -58,9 +60,15 @@ CODEX_ABOUT_RE = re.compile(
 BENCH_ROW_RE = re.compile(
     r"^\| `([^`]+)` \| `([^`]+)` (\S+)[^|]*\| `([^`]+)` \S+[^|]*"
     r"\| `([^`]+)` \|$", re.M)
-CLANG_TIDY_RE = re.compile(r"(?:warning|error): [^\n]*\]\n```")
+CLANG_TIDY_RE = re.compile(
+    r"^(?:warning|error): .*\[(?:\[[^\]]+\]\([^)\s]*\)|[^\]]+)\]$", re.M)
+LEAD_RE = re.compile(r"((?:[ \t]*>)*)([ \t]*)(.*)")
+FENCE_RE = re.compile(r"(`{3,}|~{3,})(.*)")
+INDENTED_RE = re.compile(r"(?: {4}| {0,3}\t)")
+LIST_ITEM_RE = re.compile(r"[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
+CODE_MARK = "[code omitted]"
+SUGGESTION_MARK = "[suggested change omitted]"
 CPP_PREFIX = "src/vmecpp/cpp/"
-MAX_FILES = 50
 
 # Library TUs relative to the cpp root, mirroring the vmecpp_sources list in
 # upstream's CMakeLists; vmec_standalone (the sole main()) last.
@@ -290,7 +298,7 @@ def github_get(url, token):
             if e.code not in (403, 429, 500, 502, 503, 504) or attempt == 5:
                 raise
             wait = int(e.headers.get("Retry-After") or 0) or 5 * 2 ** attempt
-        except urllib.error.URLError:
+        except (OSError, http.client.HTTPException):
             if attempt == 5:
                 raise
             wait = 5 * 2 ** attempt
@@ -358,22 +366,86 @@ def benchmark_alert(body):
 
 
 def clang_tidy(body):
-    """A clang-tidy diagnostic reduced to its message lines, else None."""
+    """A clang-tidy diagnostic reduced to its message lines, else None. The
+    suggested fix, the renames it implies elsewhere and the notes under
+    'Additional context' are dropped."""
     if not CLANG_TIDY_RE.match(body):
         return None
-    text = re.sub(r"```.*?```", "", body, flags=re.S)
-    text = re.sub(r"\[([^\]\[]+)\]\(https?://[^)\s]*\)", r"\1", text)
-    return "\n".join(line for line in text.split("\n") if line.strip())
+    return "\n".join(re.sub(r"\[([^\]\[]+)\]\(https?://[^)\s]*\)", r"\1", line)
+                     for line in CLANG_TIDY_RE.findall(body))
+
+
+def lead(line):
+    """A line's blockquote depth, its indentation inside the quote, and the
+    rest of it."""
+    quote, space, rest = LEAD_RE.fullmatch(line).groups()
+    depth = quote.count(">")
+    if depth and space.startswith(" "):
+        space = space[1:]
+    return depth, len(space.expandtabs(4)), rest
+
+
+def strip_code(body):
+    """Every code block in a post replaced by a marker line.
+
+    A fence closes at a fence of its own character and at least its length at
+    the same quote depth, or where the blockquote or list item holding it ends,
+    or else at the end of the post, as GitHub renders an unclosed fence. An
+    indented block counts as code after a blank line below a paragraph; below a
+    list item the same indentation continues the item, as Markdown reads it."""
+    lines, fence = [], None
+    for line in body.split("\n"):
+        depth, indent, rest = lead(line)
+        m = FENCE_RE.fullmatch(rest)
+        if fence:
+            char, length, f_depth, f_indent = fence
+            if (m and m.group(1)[0] == char and len(m.group(1)) >= length
+                    and not m.group(2).strip() and depth == f_depth):
+                fence = None
+                continue
+            if depth >= f_depth and (indent >= f_indent or not rest.strip()):
+                continue
+            fence = None
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = (m.group(1)[0], len(m.group(1)), depth, indent)
+            mark = (SUGGESTION_MARK if m.group(2).strip() == "suggestion"
+                    else CODE_MARK)
+            lines.append(line[:len(line) - len(rest)] + mark)
+            continue
+        lines.append(line)
+
+    out, para, i = [], "", 0
+    while i < len(lines):
+        line = lines[i]
+        after_blank = not out or not out[-1].strip()
+        if (line.strip() and INDENTED_RE.match(line) and after_blank
+                and not LIST_ITEM_RE.match(para) and not para[:1].isspace()):
+            end = i
+            while i < len(lines) and (not lines[i].strip()
+                                      or INDENTED_RE.match(lines[i])):
+                if lines[i].strip():
+                    end = i + 1
+                i += 1
+            i = end
+            out.append(CODE_MARK)
+            para = CODE_MARK
+            continue
+        if line.strip() and after_blank:
+            para = line
+        out.append(line)
+        i += 1
+    return "\n".join(out)
 
 
 def pr_text(body):
-    """A post as GitHub displays it, less HTML comments and bot boilerplate."""
+    """A post as GitHub displays it, less HTML comments, bot boilerplate and
+    code blocks."""
     body = (body or "").replace("\r\n", "\n").replace("\r", "\n")
     for reduce in (graphite_stack, benchmark_alert, clang_tidy):
         short = reduce(body)
         if short:
             return short
-    body = CODEX_ABOUT_RE.sub("", HTML_COMMENT_RE.sub("", body))
+    body = strip_code(CODEX_ABOUT_RE.sub("", HTML_COMMENT_RE.sub("", body)))
     return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 
@@ -396,40 +468,17 @@ def comment_place(c):
     return place + (" (outdated)" if outdated else "")
 
 
-def file_change(f):
-    name = f["filename"].removeprefix(CPP_PREFIX)
-    if f["status"] == "renamed":
-        old = f.get("previous_filename", "?").removeprefix(CPP_PREFIX)
-        name = f"{old} -> {name}"
-    elif f["status"] in ("added", "removed"):
-        name += f" ({f['status']})"
-    return f"{name} +{f['additions']} -{f['deletions']}"
-
-
-def render_pr(p, files, comments, reviews, inline):
-    """One pull request: header, files changed, description, then every
-    comment, review and inline review thread in time order. Pending reviews,
-    which only their author can see, are left out."""
+def render_pr(p, comments, reviews, inline):
+    """One pull request: title, description, then every comment, review and
+    inline review thread in time order. Pending reviews, which only their
+    author can see, are left out."""
     state = "OPEN" if p["state"] == "open" else "CLOSED, not merged"
     if p.get("draft"):
         state += ", draft"
     out = ["#" * 80, f"PR #{p['number']} [{state}] {p['title'].strip()}",
-           "#" * 80]
-    dates = f"author: {login(p['user'])} | opened: {when(p['created_at'])}"
-    if p.get("closed_at"):
-        dates += f" | closed: {when(p['closed_at'])}"
-    out.append(dates)
-    head = p["head"].get("label") or p["head"]["ref"]
-    out.append(f"branch: {head} -> {p['base']['ref']}")
-    labels = ", ".join(label["name"] for label in p.get("labels") or [])
-    if labels:
-        out.append(f"labels: {labels}")
-    out.append(f"url: {p['html_url']}")
-    listed = ", ".join(file_change(f) for f in files[:MAX_FILES])
-    if len(files) > MAX_FILES:
-        listed += f", and {len(files) - MAX_FILES} more"
-    out.append(f"files ({len(files)}): {listed or 'none'}")
-    out += ["", "--- description ---", pr_text(p["body"]) or "(empty)", ""]
+           "#" * 80, "",
+           f"--- description by {login(p['user'])}, {when(p['created_at'])} ---",
+           pr_text(p["body"]) or "(empty)", ""]
 
     events = []
     for c in comments:
@@ -477,8 +526,7 @@ def write_pr_digest(path, repo, token, prov):
     def fetch(p):
         n = p["number"]
         return render_pr(p, *(github_all(f"/repos/{repo}/{kind}/{n}/{what}", token)
-                              for kind, what in (("pulls", "files"),
-                                                 ("issues", "comments"),
+                              for kind, what in (("issues", "comments"),
                                                  ("pulls", "reviews"),
                                                  ("pulls", "comments"))))
 
@@ -491,15 +539,16 @@ github.com/{repo}, taken {taken}: {n_open} open, {len(prs) - n_open} closed. The
 amalgamation beside this file is built from {prov}; the changes of
 merged pull requests are in it, and those pull requests are not listed here.
 
-Each entry gives the pull request's state, author, dates, branches, labels and
-files changed, then its description and its conversation in time order:
-comments, review verdicts and summaries, and inline review comments grouped by
-thread under the file and line they address. Paths under {CPP_PREFIX} are
-given relative to it, as the amalgamation's source and header markers give
-them. Diffs are not included. HTML comments are removed, a
-Graphite stack notice is reduced to the stack, a benchmark alert to its
-measurements, and a clang-tidy diagnostic to its message. Open pull requests
-come first, then closed ones, each in number order.
+Each entry gives the pull request's title and state, then its description and
+its conversation in time order: comments, review verdicts and summaries, and
+inline review comments grouped by thread under the file and line they address,
+each post under its author and date. Paths under {CPP_PREFIX} are given
+relative to it, as the amalgamation's source and header markers give them.
+Diffs are left out, and each code block in a post is replaced by the line
+{CODE_MARK}, or {SUGGESTION_MARK} for a review suggestion. HTML
+comments are removed, a Graphite stack notice is reduced to the stack, a
+benchmark alert to its measurements, and a clang-tidy diagnostic to its
+message. Open pull requests come first, then closed ones, each in number order.
 
 """
     path.write_text(header + "\n".join(rendered), encoding="utf-8", newline="\n")

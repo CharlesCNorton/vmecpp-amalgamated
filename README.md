@@ -12,9 +12,10 @@ budget. It keeps the `// source:` and `// header:` markers, so any region maps
 back to the commented layer for the prose on that routine.
 
 `vmecpp_unmerged_prs.txt` holds every VMEC++ pull request that is open or was
-closed without merging, each with its title, description, files changed and
-whole conversation, meaning comments, review verdicts and inline review
-comments, without the diffs. Read with the amalgamation, it gives the current
+closed without merging, each with its title, description and whole
+conversation, meaning comments, review verdicts and inline review comments. The
+diffs are left out, and each code block in a post is replaced by a marker line.
+Read with the amalgamation, it gives the current
 code together with everything proposed against it and not merged: fixes already
 waiting in open pull requests, and approaches tried and abandoned. The changes
 of merged pull requests are in the amalgamation itself, and those pull requests
@@ -104,10 +105,12 @@ together, and the trailing backslash of a macro continuation is kept.
 `--prs-out` writes the pull request digest from the GitHub API at the time of
 the run, so every regeneration of the amalgamation refreshes it. It needs a
 token from `GITHUB_TOKEN` or `GH_TOKEN`, or a logged-in `gh`. Posts are kept as
-GitHub displays them, except that HTML comments are removed, a Graphite stack
-notice is reduced to the stack, a benchmark alert to its measurements, and a
-clang-tidy diagnostic to its message. Paths under `src/vmecpp/cpp/` are given
-relative to it, as the amalgamation's markers give them.
+GitHub displays them, except that each fenced or indented code block becomes
+the line `[code omitted]`, or `[suggested change omitted]` for a review
+suggestion, HTML comments are removed, a Graphite stack notice is reduced to
+the stack, a benchmark alert to its measurements, and a clang-tidy diagnostic
+to its message. Paths under `src/vmecpp/cpp/` are given relative to it, as the
+amalgamation's markers give them.
 
 ## Verification
 
