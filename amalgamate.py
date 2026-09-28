@@ -16,11 +16,12 @@ replaced by a single notice, for reading the whole repository in one pass under 
 token budget. The source/header markers are kept so a region maps back to the
 commented layer.
 
---prs-out additionally writes a digest of every VMEC++ pull request that is open
-or was closed without merging, read from the GitHub API at the time of the run:
-title, description and the whole conversation, without diffs, and with each code
-block in a post replaced by a marker line. It needs a token in GITHUB_TOKEN or
-GH_TOKEN, or a logged-in gh.
+--prs-out additionally writes a digest of the VMEC++ pull requests that are
+open, or were opened on or after --prs-cutoff and closed without merging, read
+from the GitHub API at the time of the run: title, description and the
+conversation less bot posts, without diffs, and with each code block in a post
+replaced by a marker line. It needs a token in GITHUB_TOKEN or GH_TOKEN, or a
+logged-in gh.
 
 Usage:
   python amalgamate.py \
@@ -43,11 +44,12 @@ import json
 import os
 import re
 import subprocess
+import textwrap
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*([<"])([^>"]+)[>"]')
@@ -55,13 +57,13 @@ MARKER_RE = re.compile(r'^//\s*(?:source|header):\s*\S+$')
 
 GITHUB_API = "https://api.github.com"
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
-CODEX_ABOUT_RE = re.compile(
-    r"<details>\s*<summary>[^<]*About Codex in GitHub.*?</details>", re.S)
-BENCH_ROW_RE = re.compile(
-    r"^\| `([^`]+)` \| `([^`]+)` (\S+)[^|]*\| `([^`]+)` \S+[^|]*"
-    r"\| `([^`]+)` \|$", re.M)
-CLANG_TIDY_RE = re.compile(
-    r"^(?:warning|error): .*\[(?:\[[^\]]+\]\([^)\s]*\)|[^\]]+)\]$", re.M)
+GRAPHITE_NOTICE = "This stack of pull requests is managed by"
+TRAILER_RE = re.compile(
+    r"^[ \t]*(?:co-authored-by:.*|\S*[ \t]*generated with \[claude code\]"
+    r"\([^)]*\)[ \t]*)(?:\n|$)", re.I | re.M)
+MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+HTML_IMAGE_RE = re.compile(r"<img\b[^>]*>", re.I)
+IMAGE_ALT_RE = re.compile(r"""\balt\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
 LEAD_RE = re.compile(r"((?:[ \t]*>)*)([ \t]*)(.*)")
 FENCE_RE = re.compile(r"(`{3,}|~{3,})(.*)")
 INDENTED_RE = re.compile(r"(?: {4}| {0,3}\t)")
@@ -317,62 +319,23 @@ def github_all(path, token):
     return items
 
 
-def graphite_stack(body):
-    """A Graphite stack notice reduced to its stack, top first, else None."""
-    if "This stack of pull requests is managed by" not in body:
-        return None
-    stack = []
-    for line in body.split("\n"):
-        m = re.match(r"\* \*\*#(\d+)\*\*", line)
-        if m:
-            item = f"#{m.group(1)}"
-            if "\U0001f448" in line:
-                item += " (this PR)"
-            above = re.findall(r"\[#(\d+)\]\(", line)
-            if above:
-                item += " (also under " + ", ".join(f"#{n}" for n in above) + ")"
-            stack.append(item)
-            continue
-        m = re.match(r"\* `([^`]+)`", line)
-        if m:
-            stack.append(m.group(1))
-    return "Graphite stack, top first: " + " > ".join(stack) if stack else None
+def is_bot(post):
+    return (post.get("user") or {}).get("type") == "Bot"
 
 
-def benchmark_alert(body):
-    """A github-action-benchmark alert reduced to its measurements, else None."""
-    if "github-action-benchmark" not in body:
-        return None
-    rows = BENCH_ROW_RE.findall(body)
-    if not rows:
-        return None
-
-    def num(s):
-        try:
-            return f"{float(s):.3g}"
-        except ValueError:
-            return s
-
-    head = "Benchmark alert"
-    m = re.search(r"threshold `([^`]+)`", body)
-    if m:
-        head += f", threshold {m.group(1)}"
-    m = re.search(r"Current: (\w+) \| Previous: (\w+)", body)
-    if m:
-        head += f", {m.group(1)[:8]} against {m.group(2)[:8]}"
-    return head + ": " + "; ".join(
-        f"{name.split('::')[-1]} {num(cur)} vs {num(prev)} {unit} (ratio {ratio})"
-        for name, cur, unit, prev, ratio in rows)
+def image_mark(alt):
+    """An image as the text that stands in for it: its alt text, unless that is
+    empty or GitHub's default, image, with or without a file extension."""
+    alt = " ".join(alt.split())
+    if not alt or re.fullmatch(r"image(\.\w+)?", alt, re.I):
+        return "[image]"
+    return f"[image: {alt}]"
 
 
-def clang_tidy(body):
-    """A clang-tidy diagnostic reduced to its message lines, else None. The
-    suggested fix, the renames it implies elsewhere and the notes under
-    'Additional context' are dropped."""
-    if not CLANG_TIDY_RE.match(body):
-        return None
-    return "\n".join(re.sub(r"\[([^\]\[]+)\]\(https?://[^)\s]*\)", r"\1", line)
-                     for line in CLANG_TIDY_RE.findall(body))
+def html_image_mark(tag):
+    m = IMAGE_ALT_RE.search(tag)
+    return image_mark(next((g for g in m.groups() if g is not None), "")
+                      if m else "")
 
 
 def lead(line):
@@ -438,15 +401,14 @@ def strip_code(body):
 
 
 def pr_text(body):
-    """A post as GitHub displays it, less HTML comments, bot boilerplate and
-    code blocks."""
+    """A post as GitHub displays it, less HTML comments, Co-authored-by and
+    Generated with Claude Code trailers and code blocks, and with each image
+    given as its alt text."""
     body = (body or "").replace("\r\n", "\n").replace("\r", "\n")
-    for reduce in (graphite_stack, benchmark_alert, clang_tidy):
-        short = reduce(body)
-        if short:
-            return short
-    body = strip_code(CODEX_ABOUT_RE.sub("", HTML_COMMENT_RE.sub("", body)))
-    return re.sub(r"\n{3,}", "\n\n", body).strip()
+    body = TRAILER_RE.sub("", HTML_COMMENT_RE.sub("", body))
+    body = MD_IMAGE_RE.sub(lambda m: image_mark(m.group(1)), body)
+    body = HTML_IMAGE_RE.sub(lambda m: html_image_mark(m.group(0)), body)
+    return re.sub(r"\n{3,}", "\n\n", strip_code(body)).strip()
 
 
 def when(stamp):
@@ -470,31 +432,35 @@ def comment_place(c):
 
 def render_pr(p, comments, reviews, inline):
     """One pull request: title, description, then every comment, review and
-    inline review thread in time order. Pending reviews, which only their
-    author can see, are left out."""
+    inline review thread in time order. Posts from bot accounts, Graphite stack
+    notices and pending reviews, which only their author can see, are left
+    out."""
     state = "OPEN" if p["state"] == "open" else "CLOSED, not merged"
     if p.get("draft"):
         state += ", draft"
-    out = ["#" * 80, f"PR #{p['number']} [{state}] {p['title'].strip()}",
-           "#" * 80, "",
+    out = [f"=== PR #{p['number']} [{state}] {p['title'].strip()} ===", "",
            f"--- description by {login(p['user'])}, {when(p['created_at'])} ---",
            pr_text(p["body"]) or "(empty)", ""]
 
     events = []
     for c in comments:
+        if is_bot(c) or GRAPHITE_NOTICE in (c["body"] or ""):
+            continue
         events.append((c["created_at"], 0,
                        f"--- comment by {login(c['user'])}, "
                        f"{when(c['created_at'])} ---", pr_text(c["body"])))
     pending = {r["id"] for r in reviews if r["state"] == "PENDING"}
     for r in reviews:
         body = pr_text(r["body"])
-        if r["state"] == "PENDING" or (r["state"] == "COMMENTED" and not body):
+        if (r["state"] == "PENDING" or is_bot(r)
+                or (r["state"] == "COMMENTED" and not body)):
             continue
         events.append((r["submitted_at"] or "", 1,
                        f"--- review by {login(r['user'])}, "
                        f"{when(r['submitted_at'])}: {r['state']} ---", body))
     inline = [c for c in inline
-              if c.get("pull_request_review_id") not in pending]
+              if c.get("pull_request_review_id") not in pending
+              and not is_bot(c)]
     by_id = {c["id"]: c for c in inline}
     threads = {}
     for c in inline:
@@ -518,9 +484,10 @@ def render_pr(p, comments, reviews, inline):
     return "\n".join(out) + "\n"
 
 
-def write_pr_digest(path, repo, token, prov):
+def write_pr_digest(path, repo, token, prov, cutoff):
     prs = [p for p in github_all(f"/repos/{repo}/pulls?state=all", token)
-           if p["state"] == "open" or p["merged_at"] is None]
+           if p["state"] == "open"
+           or (p["merged_at"] is None and p["created_at"][:10] >= cutoff)]
     prs.sort(key=lambda p: (p["state"] != "open", p["number"]))
 
     def fetch(p):
@@ -534,24 +501,35 @@ def write_pr_digest(path, repo, token, prov):
         rendered = list(ex.map(fetch, prs))
     n_open = sum(p["state"] == "open" for p in prs)
     taken = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    header = f"""VMEC++ pull requests that are open or were closed without merging, from
-github.com/{repo}, taken {taken}: {n_open} open, {len(prs) - n_open} closed. The
-amalgamation beside this file is built from {prov}; the changes of
-merged pull requests are in it, and those pull requests are not listed here.
 
-Each entry gives the pull request's title and state, then its description and
-its conversation in time order: comments, review verdicts and summaries, and
-inline review comments grouped by thread under the file and line they address,
-each post under its author and date. Paths under {CPP_PREFIX} are given
-relative to it, as the amalgamation's source and header markers give them.
-Diffs are left out, and each code block in a post is replaced by the line
-{CODE_MARK}, or {SUGGESTION_MARK} for a review suggestion. HTML
-comments are removed, a Graphite stack notice is reduced to the stack, a
-benchmark alert to its measurements, and a clang-tidy diagnostic to its
-message. Open pull requests come first, then closed ones, each in number order.
+    def nobreak(s):
+        return s.replace(" ", "\0")
 
-"""
-    path.write_text(header + "\n".join(rendered), encoding="utf-8", newline="\n")
+    header = (
+        f"VMEC++ pull requests from github.com/{repo} that are open, or were "
+        f"opened on or after {cutoff} and closed without merging, taken "
+        f"{nobreak(taken)}: {n_open} open, {len(prs) - n_open} closed. The "
+        f"amalgamation beside this file is built from {prov}; the changes of "
+        f"merged pull requests are in it, and those pull requests are not "
+        f"listed here.",
+        f"Each entry gives the pull request's title and state, then its "
+        f"description and its conversation in time order: comments, review "
+        f"verdicts and summaries, and inline review comments grouped by thread "
+        f"under the file and line they address, each post under its author and "
+        f"date. Paths under {CPP_PREFIX} are given relative to it, as the "
+        f"amalgamation's source and header markers give them. Diffs are left "
+        f"out, and each code block in a post is replaced by the line "
+        f"{nobreak(CODE_MARK)}, or {nobreak(SUGGESTION_MARK)} for a review "
+        f"suggestion. Comments and reviews from bot accounts are left out, as "
+        f"are Graphite stack notices; a pull request a bot opened keeps its "
+        f"description. HTML comments and Co-authored-by and Generated with "
+        f"Claude Code trailers are removed, and an image is given as its alt "
+        f"text. Open pull requests come first, then closed ones, each in number "
+        f"order.")
+    header = "\n\n".join(textwrap.fill(p, 80, break_on_hyphens=False)
+                         for p in header).replace("\0", " ")
+    path.write_text(header + "\n\n\n" + "\n".join(rendered), encoding="utf-8",
+                    newline="\n")
     return n_open, len(prs) - n_open
 
 
@@ -572,6 +550,9 @@ def main():
                     help="also write the digest of unmerged pull requests here")
     ap.add_argument("--prs-repo", default="proximafusion/vmecpp",
                     help="GitHub repository the digest reads")
+    ap.add_argument("--prs-cutoff", default="2026-04-25", type=date.fromisoformat,
+                    help="leave closed pull requests opened before this date "
+                         "(YYYY-MM-DD) out of the digest")
     args = ap.parse_args()
 
     cpp = args.cpp_root.resolve()
@@ -710,7 +691,7 @@ def main():
 
     if args.prs_out:
         n_open, n_closed = write_pr_digest(args.prs_out, args.prs_repo, token,
-                                           prov)
+                                           prov, args.prs_cutoff.isoformat())
 
     n_lines = (banner + body).count("\n") + 1
     print(f"wrote {args.out}")
