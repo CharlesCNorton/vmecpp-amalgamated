@@ -117,36 +117,18 @@ markers give them.
 
 ## Verification
 
-Checked against a conventional multi-file build of the same sources: upstream's
-own CMake build at the same commit, configured with `-DVMECPP_USE_FFTX=OFF` so
-both binaries take the partial-DFT path and `-DVMECPP_HWCAPS_DISPATCH=OFF` so
-the reference loads its baseline x86-64 core, both compiled by GCC 15.2 on
-Ubuntu 26.04 against the pinned dependency versions. Every case in upstream's
-`test_data` was run single-threaded by both binaries and the resulting HDF5
-files compared dataset by dataset with `tools/compare_outputs.py`.
-
-All 20 cases came out bit-for-bit identical, 456 datasets each and 460 for the
-five `lasym` cases. They cover fixed boundary (`solovev`, `solovev_analytical`,
-`solovev_no_axis`, `circular_tokamak`, `cma`, `near_axis_iota_nfp4`,
-`li383_low_res`, `cth_like_fixed_bdy`, `cth_like_fixed_bdy_iota`,
-`cth_like_fixed_bdy_nzeta_37`, `cth_like_fixed_bdy_spline_pressure`,
-`cth_like_fixed_bdy_asym`, `cth_like_fixed_bdy_asym_iota`, `up_down_asym`,
-`up_down_asym_current`) and free boundary (`solovev_free_bdy`,
-`solovev_free_bdy_lforbal`, `cth_like_free_bdy`, `cth_like_free_bdy_multigrid`,
-`cth_like_free_bdy_asym`), and between them the asymmetric solver, both the
-constrained-iota and constrained-current profile modes, spline-parameterized
-pressure, multigrid `ns` sequences, the guessed magnetic axis, and the
-free-boundary Nestor and abscab paths.
-
-A Clang 21 build of the same file reproduces the GCC results bit-for-bit on all
-20 cases.
-
-The stripped layer goes through the same comparison under both GCC 15.2 and
-Clang 21, and is bit-for-bit identical to the reference on all 20 cases with
-each. It is also checked structurally: `g++ -E` over both layers yields token
-streams of equal length that agree at every position but the `__FILE__` and
-`__LINE__` values the `CHECK` and `LOG` expansions embed, which name the file
-being compiled and the line it sits on.
+The amalgamation is checked against a conventional multi-file build of the same
+sources: upstream's own CMake build at the same commit, configured with
+`-DVMECPP_USE_FFTX=OFF` so it takes the partial-DFT path and
+`-DVMECPP_HWCAPS_DISPATCH=OFF` so it loads its baseline x86-64 core, compiled by
+GCC against the pinned dependency versions. Every case in upstream's `test_data`
+is run single-threaded by the reference and by both layers, each built with GCC
+and with Clang, and each output is compared with the reference's dataset by
+dataset for bit-for-bit equality with `tools/compare_outputs.py`. The two layers
+are also compared structurally: `g++ -E` over each yields token streams of equal
+length that agree at every position but the `__FILE__` and `__LINE__` values the
+`CHECK` and `LOG` expansions embed, which name the file being compiled and the
+line it sits on.
 
 Single-threaded runs are deterministic. With multiple threads, OpenMP reductions
 sum in nondeterministic order, so the last bits can vary between runs, as in
