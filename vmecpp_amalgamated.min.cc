@@ -17,7 +17,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-36-g5f4045db
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-43-g2b46babc
 //
 // Scope matches vmecpp_amalgamated.cc exactly: the whole solver, fixed and
 // free boundary, every profile parameterization, the complete output suite and
@@ -4443,6 +4443,9 @@ int ntor;
 int mpol_geometry;
 int ntor_geometry;
 
+int vacuum_mpol;
+int vacuum_ntor;
+
 int ntheta;
 
 int nzeta;
@@ -8427,9 +8430,28 @@ return absl::OkStatus();
 
 namespace vmecpp {
 
+namespace {
+
+int VacuumCutoff(int vacuum, int plasma) {
+return vacuum > plasma ? vacuum : plasma;
+}
+
+int NthetaForVacuum(const VmecINDATA& id) {
+return std::max(id.ntheta, 2 * VacuumCutoff(id.vacuum_mpol, id.mpol) + 6);
+}
+
+int NzetaForVacuum(const VmecINDATA& id) {
+const int ntor = VacuumCutoff(id.vacuum_ntor, id.ntor);
+if (ntor > 0 && id.nzeta < 2 * ntor + 4) {
+return 2 * ntor + 4;
+}
+return id.nzeta;
+}
+}
+
 Sizes::Sizes(const VmecINDATA& id)
-: Sizes(id.lasym, id.nfp, id.mpol, id.ntor, id.ntheta, id.nzeta,
-id.mpol_geometry, id.ntor_geometry) {}
+: Sizes(id.lasym, id.nfp, id.mpol, id.ntor, NthetaForVacuum(id),
+NzetaForVacuum(id), id.mpol_geometry, id.ntor_geometry) {}
 
 Sizes::Sizes(bool lasym, int nfp, int mpol, int ntor, int ntheta, int nzeta,
 int mpol_geometry, int ntor_geometry)
@@ -9035,15 +9057,20 @@ class ProfileParameterizationData {
 public:
 ProfileParameterizationData(const std::string& name, bool allowedForPres,
 bool allowedForCurr, bool allowedForIota,
-bool needsSplineData);
+int minimumSplinePoints, int minimumCoefficients);
 
 const std::string& Name() const;
+
+int MinimumSplinePoints() const;
 bool NeedsSplineData() const;
+
+int MinimumCoefficients() const;
 AllowedFor IsAllowedFor() const;
 
 private:
 const std::string name_;
-bool needsSplineData_;
+int minimumSplinePoints_;
+int minimumCoefficients_;
 AllowedFor allowedFor_;
 };
 
@@ -9108,7 +9135,8 @@ return "unknown";
 absl::Status CheckProfile(const std::string& type_key,
 const std::string& type_name,
 vmecpp::ProfileType profile_type,
-const std::string& aux_key,
+const std::string& coefficient_key,
+const Eigen::VectorXd& coefficients,
 const Eigen::VectorXd& aux_s,
 const Eigen::VectorXd& aux_f) {
 const vmecpp::ProfileParameterizationData* const parameterization =
@@ -9127,18 +9155,54 @@ return absl::InvalidArgumentError(absl::StrFormat(
 type_key, type_name, ProfileTypeName(profile_type)));
 }
 
+const int minimum_coefficients = parameterization->MinimumCoefficients();
+if (coefficients.size() < minimum_coefficients) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"'%s' is '%s', which needs at least %d coefficients, but '%s' has "
+"%d\n",
+type_key, type_name, minimum_coefficients, coefficient_key,
+coefficients.size()));
+}
+
 if (parameterization->NeedsSplineData()) {
 if (aux_s.size() == 0 || aux_f.size() == 0) {
 return absl::InvalidArgumentError(absl::StrFormat(
 "'%s' is '%s', which is a spline profile, so '%s_aux_s' and "
 "'%s_aux_f' must be given\n",
-type_key, type_name, aux_key, aux_key));
+type_key, type_name, coefficient_key, coefficient_key));
 }
 if (aux_s.size() != aux_f.size()) {
 return absl::InvalidArgumentError(absl::StrFormat(
 "'%s_aux_s' and '%s_aux_f' must have the same number of entries, "
 "but have %d and %d\n",
-aux_key, aux_key, aux_s.size(), aux_f.size()));
+coefficient_key, coefficient_key, aux_s.size(), aux_f.size()));
+}
+const int minimum_points = parameterization->MinimumSplinePoints();
+if (aux_s.size() < minimum_points) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"'%s' is '%s', which needs at least %d spline points, but "
+"'%s_aux_s' has %d\n",
+type_key, type_name, minimum_points, coefficient_key, aux_s.size()));
+}
+for (Eigen::Index i = 1; i < aux_s.size(); ++i) {
+if (aux_s[i] <= aux_s[i - 1]) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"'%s_aux_s' must increase strictly, but entries %d and %d are "
+"%g and %g\n",
+coefficient_key, i - 1, i, aux_s[i - 1], aux_s[i]));
+}
+}
+
+const bool zero_outside_knots =
+type_name.compare(0, 12, "akima_spline") == 0 ||
+type_name.compare(0, 12, "cubic_spline") == 0;
+if (zero_outside_knots &&
+(aux_s[0] > 0.0 || aux_s[aux_s.size() - 1] < 1.0)) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"'%s' is '%s', which is evaluated only inside its knots, so "
+"'%s_aux_s' must run from 0 to 1, but runs from %g to %g\n",
+type_key, type_name, coefficient_key, aux_s[0],
+aux_s[aux_s.size() - 1]));
 }
 }
 
@@ -9254,6 +9318,8 @@ nfp = 1;
 mpol = 6;
 ntor = 0;
 mpol_geometry = -1;
+vacuum_mpol = 0;
+vacuum_ntor = 0;
 ntor_geometry = -1;
 ntheta = 0;
 nzeta = 0;
@@ -9384,6 +9450,8 @@ WriteH5Dataset(nfp, "/indata/nfp", file);
 WriteH5Dataset(mpol, "/indata/mpol", file);
 WriteH5Dataset(ntor, "/indata/ntor", file);
 WriteH5Dataset(mpol_geometry, "/indata/mpol_geometry", file);
+WriteH5Dataset(vacuum_mpol, "/indata/vacuum_mpol", file);
+WriteH5Dataset(vacuum_ntor, "/indata/vacuum_ntor", file);
 WriteH5Dataset(ntor_geometry, "/indata/ntor_geometry", file);
 WriteH5Dataset(ntheta, "/indata/ntheta", file);
 WriteH5Dataset(nzeta, "/indata/nzeta", file);
@@ -9457,6 +9525,12 @@ ReadH5Dataset(m_indata.mpol_geometry, "/indata/mpol_geometry", from_file);
 }
 if (from_file.nameExists("/indata/ntor_geometry")) {
 ReadH5Dataset(m_indata.ntor_geometry, "/indata/ntor_geometry", from_file);
+}
+if (from_file.nameExists("/indata/vacuum_mpol")) {
+ReadH5Dataset(m_indata.vacuum_mpol, "/indata/vacuum_mpol", from_file);
+}
+if (from_file.nameExists("/indata/vacuum_ntor")) {
+ReadH5Dataset(m_indata.vacuum_ntor, "/indata/vacuum_ntor", from_file);
 }
 ReadH5Dataset(m_indata.ntheta, "/indata/ntheta", from_file);
 ReadH5Dataset(m_indata.nzeta, "/indata/nzeta", from_file);
@@ -9648,6 +9722,22 @@ return maybe_ntor_geometry.status();
 }
 if (maybe_ntor_geometry->has_value()) {
 vmec_indata.ntor_geometry = maybe_ntor_geometry->value();
+}
+
+auto maybe_vacuum_mpol = JsonReadInt(j, "vacuum_mpol");
+if (!maybe_vacuum_mpol.ok()) {
+return maybe_vacuum_mpol.status();
+}
+if (maybe_vacuum_mpol->has_value()) {
+vmec_indata.vacuum_mpol = maybe_vacuum_mpol->value();
+}
+
+auto maybe_vacuum_ntor = JsonReadInt(j, "vacuum_ntor");
+if (!maybe_vacuum_ntor.ok()) {
+return maybe_vacuum_ntor.status();
+}
+if (maybe_vacuum_ntor->has_value()) {
+vmec_indata.vacuum_ntor = maybe_vacuum_ntor->value();
 }
 
 auto maybe_ntheta = JsonReadInt(j, "ntheta");
@@ -10229,6 +10319,8 @@ output["mpol"] = mpol;
 output["ntor"] = ntor;
 output["mpol_geometry"] = mpol_geometry;
 output["ntor_geometry"] = ntor_geometry;
+output["vacuum_mpol"] = vacuum_mpol;
+output["vacuum_ntor"] = vacuum_ntor;
 output["ntheta"] = ntheta;
 output["nzeta"] = nzeta;
 
@@ -10368,6 +10460,28 @@ return absl::InvalidArgumentError(absl::StrFormat(
 vmec_indata.nvacskip));
 }
 
+if (vmec_indata.vacuum_mpol != 0 &&
+vmec_indata.vacuum_mpol < vmec_indata.mpol) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'vacuum_mpol' must be 0 or at least mpol = %d, but "
+"is %d\n",
+vmec_indata.mpol, vmec_indata.vacuum_mpol));
+}
+if (vmec_indata.vacuum_ntor != 0 &&
+vmec_indata.vacuum_ntor < vmec_indata.ntor) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'vacuum_ntor' must be 0 or at least ntor = %d, but "
+"is %d\n",
+vmec_indata.ntor, vmec_indata.vacuum_ntor));
+}
+if (vmec_indata.vacuum_ntor > vmec_indata.ntor && vmec_indata.nzeta > 0 &&
+vmec_indata.nzeta < 2 * vmec_indata.vacuum_ntor + 4) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'nzeta' must be at least 2 * vacuum_ntor + 4 = %d to "
+"carry the vacuum potential's toroidal cutoff, but is %d\n",
+2 * vmec_indata.vacuum_ntor + 4, vmec_indata.nzeta));
+}
+
 const int NS_MIN = 3;
 
 if (vmec_indata.ns_array.size() >
@@ -10449,7 +10563,7 @@ vmec_indata.ncurr));
 
 if (absl::Status status = CheckProfile(
 "pmass_type", vmec_indata.pmass_type, ProfileType::PRESSURE, "am",
-vmec_indata.am_aux_s, vmec_indata.am_aux_f);
+vmec_indata.am, vmec_indata.am_aux_s, vmec_indata.am_aux_f);
 !status.ok()) {
 return status;
 }
@@ -10477,9 +10591,9 @@ return absl::InvalidArgumentError(absl::StrFormat(
 vmec_indata.spres_ped));
 }
 
-if (absl::Status status =
-CheckProfile("piota_type", vmec_indata.piota_type, ProfileType::IOTA,
-"ai", vmec_indata.ai_aux_s, vmec_indata.ai_aux_f);
+if (absl::Status status = CheckProfile(
+"piota_type", vmec_indata.piota_type, ProfileType::IOTA, "ai",
+vmec_indata.ai, vmec_indata.ai_aux_s, vmec_indata.ai_aux_f);
 !status.ok()) {
 return status;
 }
@@ -10492,7 +10606,7 @@ return status;
 
 if (absl::Status status = CheckProfile(
 "pcurr_type", vmec_indata.pcurr_type, ProfileType::CURRENT, "ac",
-vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
+vmec_indata.ac, vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
 !status.ok()) {
 return status;
 }
@@ -16094,6 +16208,9 @@ Eigen::VectorXd handover_aZ;
 Eigen::VectorXd rAxis;
 Eigen::VectorXd zAxis;
 
+int vacuum_mpol;
+int vacuum_ntor;
+
 Eigen::VectorXd rCC_LCFS;
 Eigen::VectorXd rSS_LCFS;
 Eigen::VectorXd rSC_LCFS;
@@ -16102,6 +16219,8 @@ Eigen::VectorXd zSC_LCFS;
 Eigen::VectorXd zCS_LCFS;
 Eigen::VectorXd zCC_LCFS;
 Eigen::VectorXd zSS_LCFS;
+
+void SetVacuumCutoffs(int vacuum_mpol, int vacuum_ntor);
 
 Eigen::VectorXd vacuum_magnetic_pressure;
 
@@ -19277,7 +19396,9 @@ static constexpr char H5key[] = "/covariant_b_derivatives";
 struct JxBOutFileContents {
 
 RowMatrixXd itheta;
+
 RowMatrixXd izeta;
+
 RowMatrixXd bdotk;
 
 Eigen::VectorXd amaxfor;
@@ -19327,9 +19448,9 @@ Eigen::VectorXd shear;
 
 Eigen::VectorXd vpp;
 
-Eigen::VectorXd d_pressure_d_s;
+Eigen::VectorXd d_pressure_d_phi;
 
-Eigen::VectorXd d_toroidal_current_d_s;
+Eigen::VectorXd d_toroidal_current_d_phi;
 
 Eigen::VectorXd phip_realH;
 Eigen::VectorXd phip_realF;
@@ -19378,27 +19499,27 @@ Eigen::VectorXd iota;
 
 Eigen::VectorXd shear;
 
-Eigen::VectorXd d_volume_d_s;
+Eigen::VectorXd d_volume_d_phi;
 
 Eigen::VectorXd well;
 
 Eigen::VectorXd toroidal_current;
 
-Eigen::VectorXd d_toroidal_current_d_s;
+Eigen::VectorXd d_toroidal_current_d_volume;
 
 Eigen::VectorXd pressure;
 
-Eigen::VectorXd d_pressure_d_s;
-
-Eigen::VectorXd DMerc;
+Eigen::VectorXd d_pressure_d_volume;
 
 Eigen::VectorXd Dshear;
 
-Eigen::VectorXd Dwell;
-
 Eigen::VectorXd Dcurr;
 
+Eigen::VectorXd Dwell;
+
 Eigen::VectorXd Dgeod;
+
+Eigen::VectorXd DMerc;
 
 bool operator==(const MercierFileContents&) const = default;
 bool operator!=(const MercierFileContents& o) const { return !(*this == o); }
@@ -20386,15 +20507,22 @@ spectral_width_denominator_ = 0.0;
 rAxis.setZero(s_.nZeta);
 zAxis.setZero(s_.nZeta);
 
-rCC_LCFS.setZero(mnsize);
-rSS_LCFS.setZero(mnsize);
-zSC_LCFS.setZero(mnsize);
-zCS_LCFS.setZero(mnsize);
+SetVacuumCutoffs(s_.mpol, s_.ntor);
+}
+
+void HandoverStorage::SetVacuumCutoffs(int vacuum_mpol_in, int vacuum_ntor_in) {
+vacuum_mpol = vacuum_mpol_in;
+vacuum_ntor = vacuum_ntor_in;
+const int vacuum_mnsize = vacuum_mpol * (vacuum_ntor + 1);
+rCC_LCFS.setZero(vacuum_mnsize);
+rSS_LCFS.setZero(vacuum_mnsize);
+zSC_LCFS.setZero(vacuum_mnsize);
+zCS_LCFS.setZero(vacuum_mnsize);
 if (s_.lasym) {
-rSC_LCFS.setZero(mnsize);
-rCS_LCFS.setZero(mnsize);
-zCC_LCFS.setZero(mnsize);
-zSS_LCFS.setZero(mnsize);
+rSC_LCFS.setZero(vacuum_mnsize);
+rCS_LCFS.setZero(vacuum_mnsize);
+zCC_LCFS.setZero(vacuum_mnsize);
+zSS_LCFS.setZero(vacuum_mnsize);
 }
 }
 
@@ -21228,7 +21356,7 @@ const int ntorp1 = sizes.ntor + 1;
 for (int m = 0; m < sizes.mpol; ++m) {
 for (int n = 0; n < ntorp1; ++n) {
 const int idx_mn = m * ntorp1 + n;
-const int idx_nm = n * sizes.mpol + m;
+const int idx_nm = n * m_h.vacuum_mpol + m;
 m_h.rCC_LCFS[idx_nm] = physical_x.rmncc[offset + idx_mn];
 m_h.zSC_LCFS[idx_nm] = physical_x.zmnsc[offset + idx_mn];
 
@@ -25424,8 +25552,8 @@ file.createGroup(this->H5key);
 WRITEMEMBER(s);
 WRITEMEMBER(shear);
 WRITEMEMBER(vpp);
-WRITEMEMBER(d_pressure_d_s);
-WRITEMEMBER(d_toroidal_current_d_s);
+WRITEMEMBER(d_pressure_d_phi);
+WRITEMEMBER(d_toroidal_current_d_phi);
 WRITEMEMBER(phip_realH);
 WRITEMEMBER(phip_realF);
 WRITEMEMBER(vp_real);
@@ -25446,8 +25574,8 @@ MercierStabilityIntermediateQuantities& m_obj, H5::H5File& from_file) {
 READMEMBER(s);
 READMEMBER(shear);
 READMEMBER(vpp);
-READMEMBER(d_pressure_d_s);
-READMEMBER(d_toroidal_current_d_s);
+READMEMBER(d_pressure_d_phi);
+READMEMBER(d_toroidal_current_d_phi);
 READMEMBER(phip_realH);
 READMEMBER(phip_realF);
 READMEMBER(vp_real);
@@ -25469,12 +25597,12 @@ WRITEMEMBER(s);
 WRITEMEMBER(toroidal_flux);
 WRITEMEMBER(iota);
 WRITEMEMBER(shear);
-WRITEMEMBER(d_volume_d_s);
+WRITEMEMBER(d_volume_d_phi);
 WRITEMEMBER(well);
 WRITEMEMBER(toroidal_current);
-WRITEMEMBER(d_toroidal_current_d_s);
+WRITEMEMBER(d_toroidal_current_d_volume);
 WRITEMEMBER(pressure);
-WRITEMEMBER(d_pressure_d_s);
+WRITEMEMBER(d_pressure_d_volume);
 WRITEMEMBER(DMerc);
 WRITEMEMBER(Dshear);
 WRITEMEMBER(Dwell);
@@ -25489,12 +25617,12 @@ READMEMBER(s);
 READMEMBER(toroidal_flux);
 READMEMBER(iota);
 READMEMBER(shear);
-READMEMBER(d_volume_d_s);
+READMEMBER(d_volume_d_phi);
 READMEMBER(well);
 READMEMBER(toroidal_current);
-READMEMBER(d_toroidal_current_d_s);
+READMEMBER(d_toroidal_current_d_volume);
 READMEMBER(pressure);
-READMEMBER(d_pressure_d_s);
+READMEMBER(d_pressure_d_volume);
 READMEMBER(DMerc);
 READMEMBER(Dshear);
 READMEMBER(Dwell);
@@ -27729,6 +27857,7 @@ std::vector<double> bsupu1(s.nZnT, 0.0);
 std::vector<double> bsupv1(s.nZnT, 0.0);
 
 std::vector<double> bsubu1(s.nZnT, 0.0);
+
 std::vector<double> bsubv1(s.nZnT, 0.0);
 
 std::vector<double> jxb(s.nZnT, 0.0);
@@ -27752,6 +27881,7 @@ double pprime =
 fc.deltaS;
 
 const double pprime_ovp = pprime * ovp;
+
 const double pnorm = 1.0 / (std::abs(pprime_ovp) + DBL_EPSILON);
 
 double force_residual_max = -DBL_MAX;
@@ -27979,8 +28109,8 @@ MercierStabilityIntermediateQuantities mercier_intermediate;
 mercier_intermediate.s = VectorXd::Zero(fc.ns);
 mercier_intermediate.shear = VectorXd::Zero(fc.ns);
 mercier_intermediate.vpp = VectorXd::Zero(fc.ns);
-mercier_intermediate.d_pressure_d_s = VectorXd::Zero(fc.ns);
-mercier_intermediate.d_toroidal_current_d_s = VectorXd::Zero(fc.ns);
+mercier_intermediate.d_pressure_d_phi = VectorXd::Zero(fc.ns);
+mercier_intermediate.d_toroidal_current_d_phi = VectorXd::Zero(fc.ns);
 mercier_intermediate.phip_realH = VectorXd::Zero(fc.ns - 1);
 mercier_intermediate.phip_realF = VectorXd::Zero(fc.ns);
 mercier_intermediate.vp_real = VectorXd::Zero(fc.ns - 1);
@@ -28024,6 +28154,7 @@ mercier_intermediate.phip_realF[jF] =
 (mercier_intermediate.phip_realH[jHo] +
 mercier_intermediate.phip_realH[jHi]) /
 2.0;
+
 const double denom = mercier_intermediate.phip_realF[jF] * fc.deltaS;
 
 mercier_intermediate.shear[jF] =
@@ -28034,11 +28165,11 @@ mercier_intermediate.vpp[jF] = (mercier_intermediate.vp_real[jHo] -
 mercier_intermediate.vp_real[jHi]) /
 denom;
 
-mercier_intermediate.d_pressure_d_s[jF] =
+mercier_intermediate.d_pressure_d_phi[jF] =
 (vmec_internal_results.presH[jHo] - vmec_internal_results.presH[jHi]) /
 denom;
 
-mercier_intermediate.d_toroidal_current_d_s[jF] =
+mercier_intermediate.d_toroidal_current_d_phi[jF] =
 (mercier_intermediate.torcur[jHo] - mercier_intermediate.torcur[jHi]) /
 denom;
 
@@ -28086,10 +28217,10 @@ const double gtt = rtf * rtf + ztf * ztf;
 const double gpp_numerator = mercier_intermediate.gsqrt_full(index_full) *
 mercier_intermediate.gsqrt_full(index_full);
 
-const double gpp_denominator_ingredient = rtf * zzf - rzf * ztf;
-const double gpp_denominator =
-gtt * r1f * r1f +
-gpp_denominator_ingredient * gpp_denominator_ingredient;
+const double grad_s_phi = rtf * zzf - rzf * ztf;
+
+const double gpp_denominator = gtt * r1f * r1f + grad_s_phi * grad_s_phi;
+
 mercier_intermediate.gpp(index_full) = gpp_numerator / gpp_denominator;
 }
 }
@@ -28155,12 +28286,12 @@ mercier.s = VectorXd::Zero(fc.ns);
 mercier.toroidal_flux = VectorXd::Zero(fc.ns);
 mercier.iota = VectorXd::Zero(fc.ns);
 mercier.shear = VectorXd::Zero(fc.ns);
-mercier.d_volume_d_s = VectorXd::Zero(fc.ns);
+mercier.d_volume_d_phi = VectorXd::Zero(fc.ns);
 mercier.well = VectorXd::Zero(fc.ns);
 mercier.toroidal_current = VectorXd::Zero(fc.ns);
-mercier.d_toroidal_current_d_s = VectorXd::Zero(fc.ns);
+mercier.d_toroidal_current_d_volume = VectorXd::Zero(fc.ns);
 mercier.pressure = VectorXd::Zero(fc.ns);
-mercier.d_pressure_d_s = VectorXd::Zero(fc.ns);
+mercier.d_pressure_d_volume = VectorXd::Zero(fc.ns);
 
 mercier.DMerc = VectorXd::Zero(fc.ns);
 mercier.Dshear = VectorXd::Zero(fc.ns);
@@ -28194,7 +28325,7 @@ mercier.iota[jF] =
 
 mercier.shear[jF] = mercier_intermediate.shear[jF] / vp_full;
 
-mercier.d_volume_d_s[jF] = vp_full;
+mercier.d_volume_d_phi[jF] = vp_full;
 
 mercier.well[jF] =
 -mercier_intermediate.vpp[jF] * vmec_internal_results.sign_of_jacobian;
@@ -28203,15 +28334,15 @@ mercier.toroidal_current[jF] =
 (mercier_intermediate.torcur[jHo] + mercier_intermediate.torcur[jHi]) /
 2.0;
 
-mercier.d_toroidal_current_d_s[jF] =
-mercier_intermediate.d_toroidal_current_d_s[jF] / vp_full;
+mercier.d_toroidal_current_d_volume[jF] =
+mercier_intermediate.d_toroidal_current_d_phi[jF] / vp_full;
 
 mercier.pressure[jF] =
 (vmec_internal_results.presH[jHo] + vmec_internal_results.presH[jHi]) /
 2.0;
 
-mercier.d_pressure_d_s[jF] =
-mercier_intermediate.d_pressure_d_s[jF] / vp_full;
+mercier.d_pressure_d_volume[jF] =
+mercier_intermediate.d_pressure_d_phi[jF] / vp_full;
 }
 
 for (int jF = 1; jF < fc.ns - 1; ++jF) {
@@ -28226,11 +28357,11 @@ mercier_intermediate.shear[jF] * mercier_intermediate.shear[jF] / 4.0;
 
 mercier.Dcurr[jF] =
 -mercier_intermediate.shear[jF] *
-(tjb - mercier_intermediate.d_toroidal_current_d_s[jF] * tbb);
+(tjb - mercier_intermediate.d_toroidal_current_d_phi[jF] * tbb);
 
-mercier.Dwell[jF] = mercier_intermediate.d_pressure_d_s[jF] *
+mercier.Dwell[jF] = mercier_intermediate.d_pressure_d_phi[jF] *
 (mercier_intermediate.vpp[jF] -
-mercier_intermediate.d_pressure_d_s[jF] * tpp) *
+mercier_intermediate.d_pressure_d_phi[jF] * tpp) *
 tbb;
 
 mercier.Dgeod[jF] = tjb * tjb - tbb * tjj;
@@ -29407,8 +29538,8 @@ wout.equif = threed1_first_table.radial_force;
 
 const Eigen::VectorXd& vacuum_potential = handover_storage.vacuum_potential;
 if (vacuum_potential.size() > 0) {
-const int nf = s.ntor;
-const int mf = s.mpol + 1;
+const int nf = handover_storage.vacuum_ntor;
+const int mf = handover_storage.vacuum_mpol + 1;
 const int mnpd = (2 * nf + 1) * (mf + 1);
 wout.potvac = VectorXd::Zero(2 * mnpd);
 if (vacuum_potential.size() <= wout.potvac.size()) {
@@ -30216,73 +30347,96 @@ std::vector<ProfileParameterizationData> all;
 all.reserve(NUM_PARAM);
 all.emplace_back("---invalid---",  false,
 false,   false,
-false);
+0,
+0);
 all.emplace_back("power_series",  true,
 true,   true,
-false);
+0,
+0);
 all.emplace_back("power_series_i",  false,
 true,   false,
-false);
+0,
+0);
 all.emplace_back("gauss_trunc",  true,
 true,   false,
-false);
+0,
+2);
 all.emplace_back("sum_atan",  false,
 true,   true,
-false);
+0,
+0);
 all.emplace_back("two_lorentz",  true,
 false,   false,
-false);
+0,
+8);
 all.emplace_back("two_power",  true,
 true,   false,
-false);
+0,
+3);
 all.emplace_back("two_power_gs",  true,
 true,   false,
-false);
+0,
+3);
 all.emplace_back("akima_spline",  true,
 false,   true,
-true);
+4,
+0);
 all.emplace_back("akima_spline_i",  false,
 true,   false,
-true);
+4,
+0);
 all.emplace_back("akima_spline_ip",  false,
 true,   false,
-true);
+4,
+0);
 all.emplace_back("cubic_spline",  true,
 false,   true,
-true);
+4,
+0);
 all.emplace_back("cubic_spline_i",  false,
 true,   false,
-true);
+4,
+0);
 all.emplace_back("cubic_spline_ip",  false,
 true,   false,
-true);
+4,
+0);
 all.emplace_back("pedestal",  true,
 true,   false,
-false);
+0,
+0);
 all.emplace_back("rational",  true,
 true,   true,
-false);
+0,
+0);
 all.emplace_back("line_segment",  true,
 false,   true,
-true);
+2,
+0);
 all.emplace_back("line_segment_i",  false,
 true,   false,
-true);
+2,
+0);
 all.emplace_back("line_segment_ip",  false,
 true,   false,
-true);
+2,
+0);
 all.emplace_back("nice_quadratic",  false,
 false,   true,
-false);
+0,
+0);
 all.emplace_back("sum_cossq_s",  false,
 true,   false,
-false);
+0,
+0);
 all.emplace_back("sum_cossq_sqrts",  false,
 true,   false,
-false);
+0,
+0);
 all.emplace_back("sum_cossq_s_free",  false,
 true,   false,
-false);
+0,
+0);
 return all;
 }
 
@@ -30290,17 +30444,26 @@ return all;
 
 ProfileParameterizationData::ProfileParameterizationData(
 const std::string& name, bool allowedForPres, bool allowedForCurr,
-bool allowedForIota, bool needsSplineData)
+bool allowedForIota, int minimumSplinePoints, int minimumCoefficients)
 : name_(name),
-needsSplineData_(needsSplineData),
+minimumSplinePoints_(minimumSplinePoints),
+minimumCoefficients_(minimumCoefficients),
 allowedFor_({.pres = allowedForPres,
 .curr = allowedForCurr,
 .iota = allowedForIota}) {}
 
 const std::string& ProfileParameterizationData::Name() const { return name_; }
 
+int ProfileParameterizationData::MinimumSplinePoints() const {
+return minimumSplinePoints_;
+}
+
+int ProfileParameterizationData::MinimumCoefficients() const {
+return minimumCoefficients_;
+}
+
 bool ProfileParameterizationData::NeedsSplineData() const {
-return needsSplineData_;
+return minimumSplinePoints_ > 0;
 }
 
 AllowedFor ProfileParameterizationData::IsAllowedFor() const {
@@ -31656,7 +31819,8 @@ absl::StatusOr<bool> run(
 const VmecCheckpoint& checkpoint = VmecCheckpoint::NONE,
 int iterations_before_checkpointing = INT_MAX,
 int maximum_multi_grid_step = 500,
-std::optional<HotRestartState> initial_state = std::nullopt);
+std::optional<HotRestartState> initial_state = std::nullopt,
+int checkpoint_multi_grid_step = 1);
 
 void SetupVacuumSolvers();
 
@@ -31665,7 +31829,8 @@ VmecCheckpoint checkpoint, int maximum_iterations, int nsval, int ns_old,
 double& m_delt0,
 const std::optional<HotRestartState>& initial_state = std::nullopt,
 std::optional<MultigridInterpolationScheme> interpolation_scheme =
-std::nullopt);
+std::nullopt,
+bool is_checkpoint_step = true);
 absl::StatusOr<bool> SolveEquilibrium(VmecCheckpoint checkpoint,
 int maximum_iterations);
 void RestartIteration(double& m_delt0r, int thread_id);
@@ -31720,6 +31885,8 @@ int get_jacob_off() { return jacob_off_; }
 
 VmecINDATA indata_;
 Sizes s_;
+
+Sizes vacuum_s_;
 FourierBasisFastPoloidal t_;
 Boundaries b_;
 VmecConstants constants_;
@@ -31947,10 +32114,23 @@ return s;
 return v;
 }
 
+namespace {
+
+int VacuumMpol(const vmecpp::VmecINDATA& indata) {
+return std::max(indata.vacuum_mpol, indata.mpol);
+}
+int VacuumNtor(const vmecpp::VmecINDATA& indata) {
+return std::max(indata.vacuum_ntor, indata.ntor);
+}
+}
+
 Vmec::Vmec(const VmecINDATA& indata, std::optional<int> max_threads,
 OutputMode verbose, InterruptCallback interrupt_callback)
 : indata_(indata),
 s_(indata_),
+vacuum_s_(indata_.lasym, indata_.nfp, VacuumMpol(indata_),
+VacuumNtor(indata_), s_.ntheta, s_.nZeta, VacuumMpol(indata_),
+VacuumNtor(indata_)),
 t_(&s_),
 b_(&s_, &t_, indata_.signgs),
 h_(&s_),
@@ -31971,15 +32151,16 @@ fc_.haveToFlipTheta = b_.setupFromIndata(indata_, verbose_);
 
 if (fc_.lfreeb) {
 
-int nf = s_.ntor;
+int nf = vacuum_s_.ntor;
 
-int mf = s_.mpol + 1;
+int mf = vacuum_s_.mpol + 1;
 int mnpd = (2 * nf + 1) * (mf + 1);
 
 int mnpd_dim = s_.lasym ? 2 * mnpd : mnpd;
 matrixShare.setZero(mnpd_dim * mnpd_dim);
 bvecShare.setZero(mnpd_dim);
 
+h_.SetVacuumCutoffs(vacuum_s_.mpol, vacuum_s_.ntor);
 h_.vacuum_magnetic_pressure.setZero(s_.nZnT);
 h_.initial_plasma_pressure_at_boundary.setZero(s_.nZnT);
 h_.initial_vacuum_pressure_at_boundary.setZero(s_.nZnT);
@@ -31993,7 +32174,8 @@ h_.vacuum_b_z.setZero(s_.nZnT);
 absl::StatusOr<bool> Vmec::run(const VmecCheckpoint& checkpoint,
 const int iterations_before_checkpointing,
 const int maximum_multi_grid_step,
-std::optional<HotRestartState> initial_state) {
+std::optional<HotRestartState> initial_state,
+const int checkpoint_multi_grid_step) {
 if (maximum_multi_grid_step < 1) {
 return absl::InvalidArgumentError(
 absl::StrFormat("maximum_multi_grid_step must be at least 1, but is %d",
@@ -32096,9 +32278,10 @@ fc_.restart_reasons.reserve(cap);
 logger_.BeginStage(igrid, max_grids + jacob_off_, fc_.nsval, s_.mnmax,
 fc_.ftolv, fc_.niterv, fc_.lfreeb);
 
-const absl::StatusOr<bool> initialized =
-InitializeRadial(checkpoint, iterations_before_checkpointing,
-fc_.nsval, fc_.ns_old, fc_.delt0r, initial_state);
+const bool is_checkpoint_step = igrid == checkpoint_multi_grid_step - 1;
+const absl::StatusOr<bool> initialized = InitializeRadial(
+checkpoint, iterations_before_checkpointing, fc_.nsval, fc_.ns_old,
+fc_.delt0r, initial_state, std::nullopt, is_checkpoint_step);
 if (!initialized.ok()) {
 return initialized.status();
 }
@@ -32223,7 +32406,7 @@ s_.nZnT, vac_num_threads_, vac_thread_id);
 
 if (indata_.free_boundary_method == FreeBoundaryMethod::NESTOR) {
 fb_vac_[vac_thread_id] = std::make_unique<Nestor>(
-&s_, tp_vac_[vac_thread_id].get(), &mgrid_,
+&vacuum_s_, tp_vac_[vac_thread_id].get(), &mgrid_,
 std::span<double>(matrixShare.data(), matrixShare.size()),
 std::span<double>(bvecShare.data(), bvecShare.size()),
 std::span<double>(h_.vacuum_magnetic_pressure.data(),
@@ -32236,7 +32419,7 @@ std::span<double>(vacuum_reduce_slots_.data(),
 vacuum_reduce_slots_.size()));
 } else if (indata_.free_boundary_method == FreeBoundaryMethod::ONLY_COILS) {
 fb_vac_[vac_thread_id] = std::make_unique<OnlyCoils>(
-&s_, tp_vac_[vac_thread_id].get(), &mgrid_,
+&vacuum_s_, tp_vac_[vac_thread_id].get(), &mgrid_,
 std::span<double>(h_.vacuum_magnetic_pressure.data(),
 h_.vacuum_magnetic_pressure.size()),
 std::span<double>(h_.vacuum_b_r.data(), h_.vacuum_b_r.size()),
@@ -32256,7 +32439,8 @@ absl::StatusOr<bool> Vmec::InitializeRadial(
 VmecCheckpoint checkpoint, int iterations_before_checkpointing, int nsval,
 int ns_old, double& m_delt0,
 const std::optional<HotRestartState>& initial_state,
-std::optional<MultigridInterpolationScheme> interpolation_scheme) {
+std::optional<MultigridInterpolationScheme> interpolation_scheme,
+bool is_checkpoint_step) {
 
 fc_.fsq = 1.0;
 
@@ -32351,7 +32535,8 @@ if (!current_profile_status.ok()) {
 return current_profile_status;
 }
 
-if (checkpoint == VmecCheckpoint::SPECTRAL_CONSTRAINT &&
+if (is_checkpoint_step &&
+checkpoint == VmecCheckpoint::SPECTRAL_CONSTRAINT &&
 iterations_before_checkpointing <= 1) {
 
 return true;
@@ -32389,7 +32574,8 @@ p_[thread_id]->evalRadialProfiles(fc_.haveToFlipTheta, constants_);
 
 constants_.lamscale = sqrt(constants_.rmsPhiP * fc_.deltaS);
 
-if (checkpoint == VmecCheckpoint::RADIAL_PROFILES_EVAL &&
+if (is_checkpoint_step &&
+checkpoint == VmecCheckpoint::RADIAL_PROFILES_EVAL &&
 iterations_before_checkpointing <= 1) {
 return true;
 }
@@ -32419,7 +32605,8 @@ decomposed_x_[thread_id]->interpFromBoundaryAndAxis(t_, b_,
 *p_[thread_id]);
 }
 }
-if (checkpoint == VmecCheckpoint::SETUP_INITIAL_STATE &&
+if (is_checkpoint_step &&
+checkpoint == VmecCheckpoint::SETUP_INITIAL_STATE &&
 iterations_before_checkpointing <= 1) {
 return true;
 }

@@ -10,7 +10,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-36-g5f4045db
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-43-g2b46babc
 //
 // Scope: the full solver (fixed + free boundary, all profile parameterizations,
 // complete output suite). Two paths upstream keeps behind build defines are
@@ -6091,6 +6091,15 @@ class VmecINDATA {
   int mpol_geometry;
   int ntor_geometry;
 
+  // Optional larger Fourier cutoffs for the vacuum potential of a
+  // free-boundary run. NESTOR expands the potential to (mpol, ntor) like
+  // the plasma, which limits the vacuum field on helically excursing
+  // boundaries; a value above mpol / ntor raises the potential's cutoff
+  // alone, with nzeta at least 2 * vacuum_ntor + 4. 0 (default) means
+  // "use mpol / ntor".
+  int vacuum_mpol;
+  int vacuum_ntor;
+
   // number of poloidal grid points; if odd: is rounded to next smaller even
   // number
   int ntheta;
@@ -10991,9 +11000,31 @@ absl::Status WriteMakegridNetCDFFile(
 
 namespace vmecpp {
 
+namespace {
+// The vacuum potential's cutoff is the plasma's unless raised by the input.
+int VacuumCutoff(int vacuum, int plasma) {
+  return vacuum > plasma ? vacuum : plasma;
+}
+
+// The tangential grid has to resolve the larger of the plasma's and the
+// vacuum potential's cutoffs; these are the Nyquist minima computeDerivedSizes
+// applies for the plasma's, evaluated for the larger one.
+int NthetaForVacuum(const VmecINDATA& id) {
+  return std::max(id.ntheta, 2 * VacuumCutoff(id.vacuum_mpol, id.mpol) + 6);
+}
+
+int NzetaForVacuum(const VmecINDATA& id) {
+  const int ntor = VacuumCutoff(id.vacuum_ntor, id.ntor);
+  if (ntor > 0 && id.nzeta < 2 * ntor + 4) {
+    return 2 * ntor + 4;
+  }
+  return id.nzeta;
+}
+}  // namespace
+
 Sizes::Sizes(const VmecINDATA& id)
-    : Sizes(id.lasym, id.nfp, id.mpol, id.ntor, id.ntheta, id.nzeta,
-            id.mpol_geometry, id.ntor_geometry) {}
+    : Sizes(id.lasym, id.nfp, id.mpol, id.ntor, NthetaForVacuum(id),
+            NzetaForVacuum(id), id.mpol_geometry, id.ntor_geometry) {}
 
 Sizes::Sizes(bool lasym, int nfp, int mpol, int ntor, int ntheta, int nzeta,
              int mpol_geometry, int ntor_geometry)
@@ -11722,15 +11753,22 @@ class ProfileParameterizationData {
  public:
   ProfileParameterizationData(const std::string& name, bool allowedForPres,
                               bool allowedForCurr, bool allowedForIota,
-                              bool needsSplineData);
+                              int minimumSplinePoints, int minimumCoefficients);
 
   const std::string& Name() const;
+  // Number of knots the evaluator needs; 0 for a parameterization that takes
+  // polynomial coefficients instead.
+  int MinimumSplinePoints() const;
   bool NeedsSplineData() const;
+  // Number of coefficients the closed-form evaluator needs before it can
+  // form its powers and ratios; 0 for the zero-padded polynomial families.
+  int MinimumCoefficients() const;
   AllowedFor IsAllowedFor() const;
 
  private:
   const std::string name_;
-  bool needsSplineData_;
+  int minimumSplinePoints_;
+  int minimumCoefficients_;
   AllowedFor allowedFor_;
 };
 
@@ -11797,17 +11835,19 @@ std::string ProfileTypeName(vmecpp::ProfileType profile_type) {
 }
 
 // Checks that `type_name` names a profile parameterization that may be used for
-// `profile_type`, and that a spline parameterization was given its knots. An
-// unrecognized name otherwise reaches the solver as a zero profile, which
-// converges to a silently wrong equilibrium.
+// `profile_type`, that a spline parameterization was given its knots, and that
+// a closed-form parameterization was given the coefficients it needs. An
+// unrecognized name or a profile short of its data otherwise reaches the
+// solver as a zero profile, which converges to a silently wrong equilibrium.
 //
-// The polynomial coefficient arrays are deliberately not required to be
-// non-empty: they are zero-padded on read, so an empty array is a valid way to
-// specify a zero profile.
+// The polynomial coefficient arrays are zero-padded on read, so an empty
+// array is a valid way to specify a zero power series; the closed forms that
+// raise to a coefficient or divide by one need their full set.
 absl::Status CheckProfile(const std::string& type_key,
                           const std::string& type_name,
                           vmecpp::ProfileType profile_type,
-                          const std::string& aux_key,
+                          const std::string& coefficient_key,
+                          const Eigen::VectorXd& coefficients,
                           const Eigen::VectorXd& aux_s,
                           const Eigen::VectorXd& aux_f) {
   const vmecpp::ProfileParameterizationData* const parameterization =
@@ -11826,18 +11866,55 @@ absl::Status CheckProfile(const std::string& type_key,
         type_key, type_name, ProfileTypeName(profile_type)));
   }
 
+  const int minimum_coefficients = parameterization->MinimumCoefficients();
+  if (coefficients.size() < minimum_coefficients) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "'%s' is '%s', which needs at least %d coefficients, but '%s' has "
+        "%d\n",
+        type_key, type_name, minimum_coefficients, coefficient_key,
+        coefficients.size()));
+  }
+
   if (parameterization->NeedsSplineData()) {
     if (aux_s.size() == 0 || aux_f.size() == 0) {
       return absl::InvalidArgumentError(absl::StrFormat(
           "'%s' is '%s', which is a spline profile, so '%s_aux_s' and "
           "'%s_aux_f' must be given\n",
-          type_key, type_name, aux_key, aux_key));
+          type_key, type_name, coefficient_key, coefficient_key));
     }
     if (aux_s.size() != aux_f.size()) {
       return absl::InvalidArgumentError(absl::StrFormat(
           "'%s_aux_s' and '%s_aux_f' must have the same number of entries, "
           "but have %d and %d\n",
-          aux_key, aux_key, aux_s.size(), aux_f.size()));
+          coefficient_key, coefficient_key, aux_s.size(), aux_f.size()));
+    }
+    const int minimum_points = parameterization->MinimumSplinePoints();
+    if (aux_s.size() < minimum_points) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "'%s' is '%s', which needs at least %d spline points, but "
+          "'%s_aux_s' has %d\n",
+          type_key, type_name, minimum_points, coefficient_key, aux_s.size()));
+    }
+    for (Eigen::Index i = 1; i < aux_s.size(); ++i) {
+      if (aux_s[i] <= aux_s[i - 1]) {
+        return absl::InvalidArgumentError(absl::StrFormat(
+            "'%s_aux_s' must increase strictly, but entries %d and %d are "
+            "%g and %g\n",
+            coefficient_key, i - 1, i, aux_s[i - 1], aux_s[i]));
+      }
+    }
+    // The Akima and cubic evaluators return zero outside their knots; the
+    // line segments continue their end segments instead.
+    const bool zero_outside_knots =
+        type_name.compare(0, 12, "akima_spline") == 0 ||
+        type_name.compare(0, 12, "cubic_spline") == 0;
+    if (zero_outside_knots &&
+        (aux_s[0] > 0.0 || aux_s[aux_s.size() - 1] < 1.0)) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "'%s' is '%s', which is evaluated only inside its knots, so "
+          "'%s_aux_s' must run from 0 to 1, but runs from %g to %g\n",
+          type_key, type_name, coefficient_key, aux_s[0],
+          aux_s[aux_s.size() - 1]));
     }
   }
 
@@ -11959,6 +12036,8 @@ VmecINDATA::VmecINDATA() {
   mpol = 6;
   ntor = 0;
   mpol_geometry = -1;
+  vacuum_mpol = 0;
+  vacuum_ntor = 0;
   ntor_geometry = -1;
   ntheta = 0;
   nzeta = 0;
@@ -12112,6 +12191,8 @@ absl::Status VmecINDATA::WriteTo(H5::H5File& file) const {
   WriteH5Dataset(mpol, "/indata/mpol", file);
   WriteH5Dataset(ntor, "/indata/ntor", file);
   WriteH5Dataset(mpol_geometry, "/indata/mpol_geometry", file);
+  WriteH5Dataset(vacuum_mpol, "/indata/vacuum_mpol", file);
+  WriteH5Dataset(vacuum_ntor, "/indata/vacuum_ntor", file);
   WriteH5Dataset(ntor_geometry, "/indata/ntor_geometry", file);
   WriteH5Dataset(ntheta, "/indata/ntheta", file);
   WriteH5Dataset(nzeta, "/indata/nzeta", file);
@@ -12194,6 +12275,12 @@ absl::Status VmecINDATA::LoadInto(VmecINDATA& m_indata, H5::H5File& from_file) {
   }
   if (from_file.nameExists("/indata/ntor_geometry")) {
     ReadH5Dataset(m_indata.ntor_geometry, "/indata/ntor_geometry", from_file);
+  }
+  if (from_file.nameExists("/indata/vacuum_mpol")) {
+    ReadH5Dataset(m_indata.vacuum_mpol, "/indata/vacuum_mpol", from_file);
+  }
+  if (from_file.nameExists("/indata/vacuum_ntor")) {
+    ReadH5Dataset(m_indata.vacuum_ntor, "/indata/vacuum_ntor", from_file);
   }
   ReadH5Dataset(m_indata.ntheta, "/indata/ntheta", from_file);
   ReadH5Dataset(m_indata.nzeta, "/indata/nzeta", from_file);
@@ -12400,6 +12487,22 @@ absl::StatusOr<VmecINDATA> VmecINDATA::FromJson(
   }
   if (maybe_ntor_geometry->has_value()) {
     vmec_indata.ntor_geometry = maybe_ntor_geometry->value();
+  }
+
+  auto maybe_vacuum_mpol = JsonReadInt(j, "vacuum_mpol");
+  if (!maybe_vacuum_mpol.ok()) {
+    return maybe_vacuum_mpol.status();
+  }
+  if (maybe_vacuum_mpol->has_value()) {
+    vmec_indata.vacuum_mpol = maybe_vacuum_mpol->value();
+  }
+
+  auto maybe_vacuum_ntor = JsonReadInt(j, "vacuum_ntor");
+  if (!maybe_vacuum_ntor.ok()) {
+    return maybe_vacuum_ntor.status();
+  }
+  if (maybe_vacuum_ntor->has_value()) {
+    vmec_indata.vacuum_ntor = maybe_vacuum_ntor->value();
   }
 
   auto maybe_ntheta = JsonReadInt(j, "ntheta");
@@ -13011,6 +13114,8 @@ absl::StatusOr<std::string> VmecINDATA::ToJson() const {
   output["ntor"] = ntor;
   output["mpol_geometry"] = mpol_geometry;
   output["ntor_geometry"] = ntor_geometry;
+  output["vacuum_mpol"] = vacuum_mpol;
+  output["vacuum_ntor"] = vacuum_ntor;
   output["ntheta"] = ntheta;
   output["nzeta"] = nzeta;
 
@@ -13163,6 +13268,32 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
 
   /* --------------------------------- */
 
+  // vacuum_mpol, vacuum_ntor
+  // * 0 means the vacuum potential uses mpol / ntor; otherwise the cutoff may
+  //   only exceed the plasma's, since the boundary has to fit into it
+  // * the toroidal grid has to resolve the potential's toroidal cutoff
+  if (vmec_indata.vacuum_mpol != 0 &&
+      vmec_indata.vacuum_mpol < vmec_indata.mpol) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "input variable 'vacuum_mpol' must be 0 or at least mpol = %d, but "
+        "is %d\n",
+        vmec_indata.mpol, vmec_indata.vacuum_mpol));
+  }
+  if (vmec_indata.vacuum_ntor != 0 &&
+      vmec_indata.vacuum_ntor < vmec_indata.ntor) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "input variable 'vacuum_ntor' must be 0 or at least ntor = %d, but "
+        "is %d\n",
+        vmec_indata.ntor, vmec_indata.vacuum_ntor));
+  }
+  if (vmec_indata.vacuum_ntor > vmec_indata.ntor && vmec_indata.nzeta > 0 &&
+      vmec_indata.nzeta < 2 * vmec_indata.vacuum_ntor + 4) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "input variable 'nzeta' must be at least 2 * vacuum_ntor + 4 = %d to "
+        "carry the vacuum potential's toroidal cutoff, but is %d\n",
+        2 * vmec_indata.vacuum_ntor + 4, vmec_indata.nzeta));
+  }
+
   const int NS_MIN = 3;
 
   // ns_array
@@ -13258,7 +13389,7 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
   // pmass_type, am_aux_s, am_aux_f
   if (absl::Status status = CheckProfile(
           "pmass_type", vmec_indata.pmass_type, ProfileType::PRESSURE, "am",
-          vmec_indata.am_aux_s, vmec_indata.am_aux_f);
+          vmec_indata.am, vmec_indata.am_aux_s, vmec_indata.am_aux_f);
       !status.ok()) {
     return status;
   }
@@ -13294,9 +13425,9 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
 
   // piota_type, ai_aux_s, ai_aux_f. Checked for either ncurr: piota is the
   // initial guess for the iota profile even in a current-constrained run.
-  if (absl::Status status =
-          CheckProfile("piota_type", vmec_indata.piota_type, ProfileType::IOTA,
-                       "ai", vmec_indata.ai_aux_s, vmec_indata.ai_aux_f);
+  if (absl::Status status = CheckProfile(
+          "piota_type", vmec_indata.piota_type, ProfileType::IOTA, "ai",
+          vmec_indata.ai, vmec_indata.ai_aux_s, vmec_indata.ai_aux_f);
       !status.ok()) {
     return status;
   }
@@ -13310,7 +13441,7 @@ absl::Status IsConsistent(const VmecINDATA& vmec_indata,
   // pcurr_type, ac_aux_s, ac_aux_f. Ignored for ncurr == 0, still checked.
   if (absl::Status status = CheckProfile(
           "pcurr_type", vmec_indata.pcurr_type, ProfileType::CURRENT, "ac",
-          vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
+          vmec_indata.ac, vmec_indata.ac_aux_s, vmec_indata.ac_aux_f);
       !status.ok()) {
     return status;
   }
@@ -20068,6 +20199,11 @@ class HandoverStorage {
   Eigen::VectorXd rAxis;
   Eigen::VectorXd zAxis;
 
+  // Fourier cutoffs of the vacuum potential; the LCFS rows below are laid
+  // out as n * vacuum_mpol + m for NESTOR, which expands to these.
+  int vacuum_mpol;
+  int vacuum_ntor;
+
   // LCFS geometry for NESTOR
   Eigen::VectorXd rCC_LCFS;
   Eigen::VectorXd rSS_LCFS;
@@ -20077,6 +20213,10 @@ class HandoverStorage {
   Eigen::VectorXd zCS_LCFS;
   Eigen::VectorXd zCC_LCFS;
   Eigen::VectorXd zSS_LCFS;
+
+  // Size the LCFS rows for a vacuum potential expanded to (vacuum_mpol,
+  // vacuum_ntor); the constructor sizes them for the plasma's cutoffs.
+  void SetVacuumCutoffs(int vacuum_mpol, int vacuum_ntor);
 
   // [nZnT] vacuum magnetic pressure |B_vac^2|/2 at the plasma boundary
   Eigen::VectorXd vacuum_magnetic_pressure;
@@ -24064,8 +24204,14 @@ struct CovariantBDerivatives {
 
 struct JxBOutFileContents {
   // (num_full, nZnT)
+  // sqrt(g) * j^theta
   RowMatrixXd itheta;
+
+  // (num_full, nZnT)
+  // sqrt(g) * j^phi
   RowMatrixXd izeta;
+
+  // sqrt(g) * (j^theta B_theta + j^phi * B_phi) = sqrt(g) * j.B
   RowMatrixXd bdotk;
 
   Eigen::VectorXd amaxfor;
@@ -24120,17 +24266,20 @@ struct MercierStabilityIntermediateQuantities {
   // normalized toroidal flux on full-grid
   Eigen::VectorXd s;
 
-  // magnetic shear == radial derivative of iota on full grid
+  // magnetic shear == radial derivative of iota
+  // d(iota)/dPhi on full grid
   Eigen::VectorXd shear;
 
-  // magnetic well == d^2V/ds^2 on full grid
+  // magnetic well
+  // d(VP)/d(PHI) = d^2(V)/d(Phi)^2 on full grid
   Eigen::VectorXd vpp;
 
-  // radial derivative of kinetic pressure on full grid
-  Eigen::VectorXd d_pressure_d_s;
+  // radial derivative of kinetic pressure
+  // dp/dPhi on full grid
+  Eigen::VectorXd d_pressure_d_phi;
 
-  // d(I_tor)/ds on full grid
-  Eigen::VectorXd d_toroidal_current_d_s;
+  // d(I_tor)/dPhi on full grid
+  Eigen::VectorXd d_toroidal_current_d_phi;
 
   // real, physical d(phi)/ds on half-grid
   Eigen::VectorXd phip_realH;
@@ -24142,15 +24291,15 @@ struct MercierStabilityIntermediateQuantities {
   // toroidal current on half-grid
   Eigen::VectorXd torcur;
 
-  // Jacobian on full-grid
+  // Jacobian on full-grid; first s-based, later flux-based (phi)
   // (num_full, nZnT)
   RowMatrixXd gsqrt_full;
 
-  // B \cdot j on full-grid
+  // mu_0 * j.B on full-grid
   // (num_full, nZnT)
   RowMatrixXd bdotj;
 
-  // 1 / |grad(s)|^2 on full-grid, formed as sqrt(g)^2 / |e_theta x e_zeta|^2
+  // 1.0 / |grad Phi|^2 on full-grid
   // (num_full, nZnT)
   RowMatrixXd gpp;
 
@@ -24158,16 +24307,16 @@ struct MercierStabilityIntermediateQuantities {
   // (num_half, nZnT)
   RowMatrixXd b2;
 
-  // <1/B**2> on full-grid
+  // <1/B^2> on full-grid
   Eigen::VectorXd tpp;
 
-  // <b*b/|grad-phi|**3> on full-grid
+  // <B.B/|grad-phi|^2> = <B^2/|grad-phi|^2> on full-grid
   Eigen::VectorXd tbb;
 
-  // <j*b/|grad-phi|**3>
+  // <j.B/|grad-phi|^2> on full-grid
   Eigen::VectorXd tjb;
 
-  // <(j*b)2/b**2*|grad-phi|**3>
+  // // <(j.B)^2/(B^2 * |grad-phi|^2)> on full-grid
   Eigen::VectorXd tjj;
 
   bool operator==(const MercierStabilityIntermediateQuantities&) const =
@@ -24200,43 +24349,51 @@ struct MercierFileContents {
   // rotational transform on full grid
   Eigen::VectorXd iota;
 
-  // magnetic shear == radial derivative of iota on full grid
+  // magnetic shear == radial derivative of iota
+  // d(iota)/dPhi / dV/dPhi = d(iota)/dV on full grid
   Eigen::VectorXd shear;
 
-  // dV/ds on full grid
-  Eigen::VectorXd d_volume_d_s;
+  // dV/dPhi on full grid
+  Eigen::VectorXd d_volume_d_phi;
 
-  // magnetic well == d^2V/ds^2 on full grid
+  // magnetic well
+  // -signgs * d^2(V)/d(Phi)^2 on full grid
   Eigen::VectorXd well;
 
   // I_tor on full grid
   Eigen::VectorXd toroidal_current;
 
-  // d(I_tor)/ds on full grid
-  Eigen::VectorXd d_toroidal_current_d_s;
+  // d(I_tor)/ds / dV/dPhi = d(I_tor)/dV on full grid
+  Eigen::VectorXd d_toroidal_current_d_volume;
 
   // kinetic pressure on full grid
   Eigen::VectorXd pressure;
 
-  // radial derivative of kinetic pressure on full grid
-  Eigen::VectorXd d_pressure_d_s;
+  // radial derivative of kinetic pressure
+  // dp/dPhi / dV/dPhi = dp/dV on full grid
+  Eigen::VectorXd d_pressure_d_volume;
 
   // -------------------
 
-  // Mercier criterion on full grid
-  Eigen::VectorXd DMerc;
-
-  // shear contribution to Mercier criterion on full grid
+  // shear contribution to Mercier criterion
+  // (iota')^2 / 4 on full grid
   Eigen::VectorXd Dshear;
 
-  // magnetic well contribution to Mercier criterion on full grid
-  Eigen::VectorXd Dwell;
-
-  // toroidal current contribution to Mercier criterion on full grid
+  // toroidal current contribution to Mercier criterion
+  // -iota' * [<j.B/|grad-phi|^2> - I' * <B^2/|grad-phi|^2>] on full grid
   Eigen::VectorXd Dcurr;
 
-  // geodesic curvature contribution to Mercier criterion on full grid
+  // magnetic well contribution to Mercier criterion
+  // p' * [V'' - p' * <1/B^2>] * <B^2/|grad-phi|^2> on full grid
+  Eigen::VectorXd Dwell;
+
+  // geodesic curvature contribution to Mercier criterion
+  // ( <j.B/|grad-phi|^2> )^2 - <B^2/|grad-phi|^2> * <(j.B)^2/(B^2 *
+  // |grad-phi|^2)> on full grid
   Eigen::VectorXd Dgeod;
+
+  // Mercier criterion on full grid
+  Eigen::VectorXd DMerc;
 
   bool operator==(const MercierFileContents&) const = default;
   bool operator!=(const MercierFileContents& o) const { return !(*this == o); }
@@ -25498,15 +25655,22 @@ HandoverStorage::HandoverStorage(const Sizes* s) : s_(*s) {
   rAxis.setZero(s_.nZeta);
   zAxis.setZero(s_.nZeta);
 
-  rCC_LCFS.setZero(mnsize);
-  rSS_LCFS.setZero(mnsize);
-  zSC_LCFS.setZero(mnsize);
-  zCS_LCFS.setZero(mnsize);
+  SetVacuumCutoffs(s_.mpol, s_.ntor);
+}
+
+void HandoverStorage::SetVacuumCutoffs(int vacuum_mpol_in, int vacuum_ntor_in) {
+  vacuum_mpol = vacuum_mpol_in;
+  vacuum_ntor = vacuum_ntor_in;
+  const int vacuum_mnsize = vacuum_mpol * (vacuum_ntor + 1);
+  rCC_LCFS.setZero(vacuum_mnsize);
+  rSS_LCFS.setZero(vacuum_mnsize);
+  zSC_LCFS.setZero(vacuum_mnsize);
+  zCS_LCFS.setZero(vacuum_mnsize);
   if (s_.lasym) {
-    rSC_LCFS.setZero(mnsize);
-    rCS_LCFS.setZero(mnsize);
-    zCC_LCFS.setZero(mnsize);
-    zSS_LCFS.setZero(mnsize);
+    rSC_LCFS.setZero(vacuum_mnsize);
+    rCS_LCFS.setZero(vacuum_mnsize);
+    zCC_LCFS.setZero(vacuum_mnsize);
+    zSS_LCFS.setZero(vacuum_mnsize);
   }
 }
 
@@ -26463,7 +26627,8 @@ namespace {
 
 // Set m_h.rCC_LCFS etc. to the corresponding values in the FourierGeometry
 // of the last surface, also transposing m and n dimensions to make the
-// data layout what Nestor expects.
+// data layout what Nestor expects: n * vacuum_mpol + m, where the vacuum
+// potential's cutoffs may exceed the plasma's, leaving the higher modes zero.
 void HandOverBoundaryGeometry(vmecpp::HandoverStorage& m_h,
                               const vmecpp::FourierGeometry& physical_x,
                               const vmecpp::Sizes& sizes, int offset) {
@@ -26471,7 +26636,7 @@ void HandOverBoundaryGeometry(vmecpp::HandoverStorage& m_h,
   for (int m = 0; m < sizes.mpol; ++m) {
     for (int n = 0; n < ntorp1; ++n) {
       const int idx_mn = m * ntorp1 + n;
-      const int idx_nm = n * sizes.mpol + m;
+      const int idx_nm = n * m_h.vacuum_mpol + m;
       m_h.rCC_LCFS[idx_nm] = physical_x.rmncc[offset + idx_mn];
       m_h.zSC_LCFS[idx_nm] = physical_x.zmnsc[offset + idx_mn];
 
@@ -26837,7 +27002,9 @@ void IdealMhdModel::evalFResInvar(const Eigen::Vector3d& localFResInvar) {
 #endif  // _OPENMP
   {
     // set new values
-    // TODO(jons): what is `r1scale`?
+    // 1 / (2 * r0scale)^2 with r0scale = mscale[0] * nscale[0] = 1: the
+    // reciprocal of the squared basis normalization a mode with both indices
+    // non-zero carries. Lambda is normalized by lamscale^2 instead.
     constexpr double r1scale = 0.25;
 
     m_fc_.fsqr = m_fc_.fResInvar[0] * m_h_.fNormRZ * r1scale;
@@ -27377,6 +27544,8 @@ absl::StatusOr<bool> IdealMhdModel::update(
   // TODO(jurasic) the hard-coded 50 and 1e-6 are only here for backwards
   // compatibility, ideally vacuum-pressure should always part of the
   // force-balance
+  // iter1 is set at the start of a multigrid stage and at every bad-Jacobian
+  // restart, so the window counts iterations since whichever came last.
   bool almost_converged = (m_fc.fsqr + m_fc.fsqz) < 1.0e-6;
   // In iter==1, the forces are initialized to 1.0 so includeEdgeRZForces
   // wouldn't trigger without special handling for the hot-restart case.
@@ -28814,8 +28983,7 @@ void IdealMhdModel::computePreconditioningMatrix(
  * Note that this needs to have the radial preconditioner updated.
  */
 double IdealMhdModel::constraintMultiplierScale() const {
-  // TODO(jons): some parabola in ns,
-  // but why these specific values of the parameters ?
+  // An empirically determined scaling.
   const double tcon_multiplier =
       tcon0 * (1.0 + m_fc_.ns * (1.0 / 60.0 + m_fc_.ns / (200.0 * 120.0)));
 
@@ -31410,8 +31578,8 @@ absl::Status vmecpp::MercierStabilityIntermediateQuantities::WriteTo(
   WRITEMEMBER(s);
   WRITEMEMBER(shear);
   WRITEMEMBER(vpp);
-  WRITEMEMBER(d_pressure_d_s);
-  WRITEMEMBER(d_toroidal_current_d_s);
+  WRITEMEMBER(d_pressure_d_phi);
+  WRITEMEMBER(d_toroidal_current_d_phi);
   WRITEMEMBER(phip_realH);
   WRITEMEMBER(phip_realF);
   WRITEMEMBER(vp_real);
@@ -31432,8 +31600,8 @@ absl::Status vmecpp::MercierStabilityIntermediateQuantities::LoadInto(
   READMEMBER(s);
   READMEMBER(shear);
   READMEMBER(vpp);
-  READMEMBER(d_pressure_d_s);
-  READMEMBER(d_toroidal_current_d_s);
+  READMEMBER(d_pressure_d_phi);
+  READMEMBER(d_toroidal_current_d_phi);
   READMEMBER(phip_realH);
   READMEMBER(phip_realF);
   READMEMBER(vp_real);
@@ -31455,12 +31623,12 @@ absl::Status vmecpp::MercierFileContents::WriteTo(H5::H5File& file) const {
   WRITEMEMBER(toroidal_flux);
   WRITEMEMBER(iota);
   WRITEMEMBER(shear);
-  WRITEMEMBER(d_volume_d_s);
+  WRITEMEMBER(d_volume_d_phi);
   WRITEMEMBER(well);
   WRITEMEMBER(toroidal_current);
-  WRITEMEMBER(d_toroidal_current_d_s);
+  WRITEMEMBER(d_toroidal_current_d_volume);
   WRITEMEMBER(pressure);
-  WRITEMEMBER(d_pressure_d_s);
+  WRITEMEMBER(d_pressure_d_volume);
   WRITEMEMBER(DMerc);
   WRITEMEMBER(Dshear);
   WRITEMEMBER(Dwell);
@@ -31475,12 +31643,12 @@ absl::Status vmecpp::MercierFileContents::LoadInto(MercierFileContents& m_obj,
   READMEMBER(toroidal_flux);
   READMEMBER(iota);
   READMEMBER(shear);
-  READMEMBER(d_volume_d_s);
+  READMEMBER(d_volume_d_phi);
   READMEMBER(well);
   READMEMBER(toroidal_current);
-  READMEMBER(d_toroidal_current_d_s);
+  READMEMBER(d_toroidal_current_d_volume);
   READMEMBER(pressure);
-  READMEMBER(d_pressure_d_s);
+  READMEMBER(d_pressure_d_volume);
   READMEMBER(DMerc);
   READMEMBER(Dshear);
   READMEMBER(Dwell);
@@ -33797,6 +33965,7 @@ vmecpp::JxBOutFileContents vmecpp::ComputeJxBOutputFileContents(
 
   std::vector<double> pprim(fc.ns, 0.0);
 
+  // sqrt(g) * ((B^2/2 + mu_0 p) - mu_0 p) = sqrt(g) * B^2/2 on full grid
   std::vector<double> sqgb2(s.nZnT, 0.0);
 
   std::vector<double> kperpu(s.nZnT, 0.0);
@@ -33809,11 +33978,15 @@ vmecpp::JxBOutFileContents vmecpp::ComputeJxBOutputFileContents(
   std::vector<double> bsupu1(s.nZnT, 0.0);
   std::vector<double> bsupv1(s.nZnT, 0.0);
 
+  // B_theta on full-grid
   std::vector<double> bsubu1(s.nZnT, 0.0);
+
+  // B_phi on full-grid
   std::vector<double> bsubv1(s.nZnT, 0.0);
 
   std::vector<double> jxb(s.nZnT, 0.0);
 
+  // (2 pi)^2
   static constexpr double dnorm1 = 4.0 * M_PI * M_PI;
 
   for (int jF = 1; jF < fc.ns - 1; ++jF) {
@@ -33822,21 +33995,26 @@ vmecpp::JxBOutFileContents vmecpp::ComputeJxBOutputFileContents(
 
     // "over-vp"
     // 1/V' on full grid
-    // and 4 pi^2 divided out
+    // and 4 pi^2 divided out (dVdsH did contain a factor of (2 pi)^2)
     const double ovp =
         2.0 /
         (vmec_internal_results.dVdsH[jHo] + vmec_internal_results.dVdsH[jHi]) /
         dnorm1;
 
+    // signgs / V'
     const double tjnorm = ovp * vmec_internal_results.sign_of_jacobian;
 
-    // dp/ds here
+    // presH contains mu_0 * p
+    // --> pprime = dp/ds here
     double pprime =
         1.0 / MU_0 *
         (vmec_internal_results.presH[jHo] - vmec_internal_results.presH[jHi]) /
         fc.deltaS;
 
+    // dp/ds * 1/V' = dp/dV
     const double pprime_ovp = pprime * ovp;
+
+    // 1 / (|dp/dV| + 2.2e-16)
     const double pnorm = 1.0 / (std::abs(pprime_ovp) + DBL_EPSILON);
 
     double force_residual_max = -DBL_MAX;
@@ -34143,8 +34321,8 @@ vmecpp::ComputeIntermediateMercierQuantities(
   mercier_intermediate.s = VectorXd::Zero(fc.ns);
   mercier_intermediate.shear = VectorXd::Zero(fc.ns);
   mercier_intermediate.vpp = VectorXd::Zero(fc.ns);
-  mercier_intermediate.d_pressure_d_s = VectorXd::Zero(fc.ns);
-  mercier_intermediate.d_toroidal_current_d_s = VectorXd::Zero(fc.ns);
+  mercier_intermediate.d_pressure_d_phi = VectorXd::Zero(fc.ns);
+  mercier_intermediate.d_toroidal_current_d_phi = VectorXd::Zero(fc.ns);
   mercier_intermediate.phip_realH = VectorXd::Zero(fc.ns - 1);
   mercier_intermediate.phip_realF = VectorXd::Zero(fc.ns);
   mercier_intermediate.vp_real = VectorXd::Zero(fc.ns - 1);
@@ -34168,12 +34346,13 @@ vmecpp::ComputeIntermediateMercierQuantities(
         2.0 * M_PI * vmec_internal_results.phipH[jH] *
         vmec_internal_results.sign_of_jacobian;
 
-    // dV/d(PHI) on half mesh
+    // dV/ds / dPhi/ds = dV/d(PHI) on half mesh
     mercier_intermediate.vp_real[jH] =
         vmec_internal_results.sign_of_jacobian * (4.0 * M_PI * M_PI) *
         vmec_internal_results.dVdsH[jH] / mercier_intermediate.phip_realH[jH];
 
     // COMPUTE INTEGRATED TOROIDAL CURRENT
+    // I_tor = 2 pi * < B_theta >
     for (int kl = 0; kl < s.nZnT; ++kl) {
       const int idx_kl = jH * s.nZnT + kl;
       const int l = kl % s.nThetaEff;
@@ -34189,10 +34368,13 @@ vmecpp::ComputeIntermediateMercierQuantities(
     const int jHi = jF - 1;
     const int jHo = jF;
 
+    // real dPhi/ds on full-grid
     mercier_intermediate.phip_realF[jF] =
         (mercier_intermediate.phip_realH[jHo] +
          mercier_intermediate.phip_realH[jHi]) /
         2.0;
+
+    // dPhi/ds * ds = dPhi
     const double denom = mercier_intermediate.phip_realF[jF] * fc.deltaS;
 
     // d(iota)/d(PHI)
@@ -34200,18 +34382,18 @@ vmecpp::ComputeIntermediateMercierQuantities(
         (vmec_internal_results.iotaH[jHo] - vmec_internal_results.iotaH[jHi]) /
         denom;
 
-    // d(VP)/d(PHI)
+    // d(VP)/d(PHI) = d^2(V)/d(Phi)^2
     mercier_intermediate.vpp[jF] = (mercier_intermediate.vp_real[jHo] -
                                     mercier_intermediate.vp_real[jHi]) /
                                    denom;
 
     // d(p)/d(PHI)
-    mercier_intermediate.d_pressure_d_s[jF] =
+    mercier_intermediate.d_pressure_d_phi[jF] =
         (vmec_internal_results.presH[jHo] - vmec_internal_results.presH[jHi]) /
         denom;
 
     // d(Itor)/d(PHI)
-    mercier_intermediate.d_toroidal_current_d_s[jF] =
+    mercier_intermediate.d_toroidal_current_d_phi[jF] =
         (mercier_intermediate.torcur[jHo] - mercier_intermediate.torcur[jHi]) /
         denom;
 
@@ -34237,6 +34419,7 @@ vmecpp::ComputeIntermediateMercierQuantities(
           jxbout.bdotk(index_full) * MU_0 /
           mercier_intermediate.gsqrt_full(index_full);
 
+      // make sqrt(g) into flux-based jacobian (s --> phi)
       mercier_intermediate.gsqrt_full(index_full) /=
           mercier_intermediate.phip_realF[jF];
     }  // kl
@@ -34270,19 +34453,26 @@ vmecpp::ComputeIntermediateMercierQuantities(
       // g_uu
       const double gtt = rtf * rtf + ztf * ztf;
 
+      // |grad s|^2 = [(R_theta R)^2 + (Z_theta R)^2 + (Z_theta R_phi - R_theta
+      // Z_phi)^2] / (sqrt(g))^2
+      // --> 1/|grad s|^2 = (sqrt(g))^2 / [(R_theta R)^2 + (Z_theta R)^2 +
+      // (Z_theta R_phi - R_theta Z_phi)^2]
+
+      // flux-based (sqrt(g))^2
       const double gpp_numerator = mercier_intermediate.gsqrt_full(index_full) *
                                    mercier_intermediate.gsqrt_full(index_full);
 
-      // The denominator is |e_theta x e_zeta|^2. In the cylindrical frame
-      // e_theta x e_zeta = -R z_theta rhat + (r_zeta z_theta - r_theta z_zeta)
-      // phihat + R r_theta zhat, so its square is R^2 g_theta,theta plus the
-      // square of the toroidal component below. With grad(s) = (e_theta x
-      // e_zeta) / sqrt(g), the quotient formed here is sqrt(g)^2 /
-      // |e_theta x e_zeta|^2 = 1 / |grad(s)|^2.
-      const double gpp_denominator_ingredient = rtf * zzf - rzf * ztf;
-      const double gpp_denominator =
-          gtt * r1f * r1f +
-          gpp_denominator_ingredient * gpp_denominator_ingredient;
+      // negative toroidal component of grad s:
+      // -(Z_theta R_phi - R_theta Z_phi)
+      const double grad_s_phi = rtf * zzf - rzf * ztf;
+
+      // The denominator is |e_theta x e_zeta|^2
+      // (R_theta R)^2 + (Z_theta R)^2 = (R_theta^2 + Z_theta^2) * R^2 == g_uu *
+      // R^2
+      const double gpp_denominator = gtt * r1f * r1f + grad_s_phi * grad_s_phi;
+
+      // 1/|grad Phi|^2 = (sqrt(g))^2 / [(R_theta R)^2 + (Z_theta R)^2 +
+      // (Z_theta R_phi - R_theta Z_phi)^2]
       mercier_intermediate.gpp(index_full) = gpp_numerator / gpp_denominator;
     }  // kl
   }  // jF
@@ -34313,27 +34503,28 @@ vmecpp::ComputeIntermediateMercierQuantities(
       const int index_half_o = jHo * s.nZnT + kl;
       const int index_half_i = jHi * s.nZnT + kl;
 
+      // |B|^2 on full-grid
       const double b2i = (mercier_intermediate.b2(index_half_o) +
                           mercier_intermediate.b2(index_half_i)) /
                          2.0;
 
-      // <1/B**2>
+      // <1/B^2>
       const double ob2 = mercier_intermediate.gsqrt_full(index_full) / b2i;
       mercier_intermediate.tpp[jF] += ob2 * s.wInt[l];
 
-      // <b*b/|grad-phi|**3>
+      // <B.B/|grad-phi|^2> = <B^2/|grad-phi|^2>
       const double ob2_reused = b2i *
                                 mercier_intermediate.gsqrt_full(index_full) *
                                 mercier_intermediate.gpp(index_full);
       mercier_intermediate.tbb[jF] += ob2_reused * s.wInt[l];
 
-      // <j*b/|grad-phi|**3>
+      // <j.B/|grad-phi|^2>
       const double jdotb = mercier_intermediate.bdotj(index_full) *
                            mercier_intermediate.gpp(index_full) *
                            mercier_intermediate.gsqrt_full(index_full);
       mercier_intermediate.tjb[jF] += jdotb * s.wInt[l];
 
-      // <(j*b)2/b**2*|grad-phi|**3>
+      // <(j.B)^2/(B^2 * |grad-phi|^2)>
       const double jdotb_reused =
           jdotb * mercier_intermediate.bdotj(index_full) / b2i;
       mercier_intermediate.tjj[jF] += jdotb_reused * s.wInt[l];
@@ -34357,12 +34548,12 @@ vmecpp::MercierFileContents vmecpp::ComputeMercierStability(
   mercier.toroidal_flux = VectorXd::Zero(fc.ns);
   mercier.iota = VectorXd::Zero(fc.ns);
   mercier.shear = VectorXd::Zero(fc.ns);
-  mercier.d_volume_d_s = VectorXd::Zero(fc.ns);
+  mercier.d_volume_d_phi = VectorXd::Zero(fc.ns);
   mercier.well = VectorXd::Zero(fc.ns);
   mercier.toroidal_current = VectorXd::Zero(fc.ns);
-  mercier.d_toroidal_current_d_s = VectorXd::Zero(fc.ns);
+  mercier.d_toroidal_current_d_volume = VectorXd::Zero(fc.ns);
   mercier.pressure = VectorXd::Zero(fc.ns);
-  mercier.d_pressure_d_s = VectorXd::Zero(fc.ns);
+  mercier.d_pressure_d_volume = VectorXd::Zero(fc.ns);
 
   // -------------------
 
@@ -34380,6 +34571,7 @@ vmecpp::MercierFileContents vmecpp::ComputeMercierStability(
     // S
     mercier.s[jF] = mercier_intermediate.s[jF];
 
+    // V' = dV/dPhi on full-grid
     const double vp_full = (mercier_intermediate.vp_real[jHo] +
                             mercier_intermediate.vp_real[jHi]) /
                            2.0;
@@ -34400,13 +34592,13 @@ vmecpp::MercierFileContents vmecpp::ComputeMercierStability(
         (vmec_internal_results.iotaH[jHo] + vmec_internal_results.iotaH[jHi]) /
         2.0;
 
-    // SHEAR
+    // SHEAR = d(iota)/dPhi / dV/dPhi = d(iota)/dV
     mercier.shear[jF] = mercier_intermediate.shear[jF] / vp_full;
 
-    // VP
-    mercier.d_volume_d_s[jF] = vp_full;
+    // VP = dV/dPhi
+    mercier.d_volume_d_phi[jF] = vp_full;
 
-    // WELL
+    // WELL = -signgs * d^2(V)/d(Phi)^2
     mercier.well[jF] =
         -mercier_intermediate.vpp[jF] * vmec_internal_results.sign_of_jacobian;
 
@@ -34415,18 +34607,18 @@ vmecpp::MercierFileContents vmecpp::ComputeMercierStability(
         (mercier_intermediate.torcur[jHo] + mercier_intermediate.torcur[jHi]) /
         2.0;
 
-    // ITOR'
-    mercier.d_toroidal_current_d_s[jF] =
-        mercier_intermediate.d_toroidal_current_d_s[jF] / vp_full;
+    // ITOR' = d(I_tor)/ds / dV/dPhi = d(I_tor)/dV
+    mercier.d_toroidal_current_d_volume[jF] =
+        mercier_intermediate.d_toroidal_current_d_phi[jF] / vp_full;
 
     // PRES
     mercier.pressure[jF] =
         (vmec_internal_results.presH[jHo] + vmec_internal_results.presH[jHi]) /
         2.0;
 
-    // PRES'
-    mercier.d_pressure_d_s[jF] =
-        mercier_intermediate.d_pressure_d_s[jF] / vp_full;
+    // PRES' = dp/dPhi / dV/dPhi = dp/dV
+    mercier.d_pressure_d_volume[jF] =
+        mercier_intermediate.d_pressure_d_phi[jF] / vp_full;
   }  // jF
 
   // second table in Mercier output file
@@ -34437,18 +34629,23 @@ vmecpp::MercierFileContents vmecpp::ComputeMercierStability(
     const double tbb = mercier_intermediate.tbb[jF];
     const double tjj = mercier_intermediate.tjj[jF];
 
+    // (iota')^2 / 4
     mercier.Dshear[jF] =
         mercier_intermediate.shear[jF] * mercier_intermediate.shear[jF] / 4.0;
 
+    // -iota' * [<j.B/|grad-phi|^2> - I' * <B^2/|grad-phi|^2>]
     mercier.Dcurr[jF] =
         -mercier_intermediate.shear[jF] *
-        (tjb - mercier_intermediate.d_toroidal_current_d_s[jF] * tbb);
+        (tjb - mercier_intermediate.d_toroidal_current_d_phi[jF] * tbb);
 
-    mercier.Dwell[jF] = mercier_intermediate.d_pressure_d_s[jF] *
+    // p' * [V'' - p' * <1/B^2>] * <B^2/|grad-phi|^2>
+    mercier.Dwell[jF] = mercier_intermediate.d_pressure_d_phi[jF] *
                         (mercier_intermediate.vpp[jF] -
-                         mercier_intermediate.d_pressure_d_s[jF] * tpp) *
+                         mercier_intermediate.d_pressure_d_phi[jF] * tpp) *
                         tbb;
 
+    // ( <j.B/|grad-phi|^2> )^2 - <B^2/|grad-phi|^2> * <(j.B)^2/(B^2 *
+    // |grad-phi|^2)>
     mercier.Dgeod[jF] = tjb * tjb - tbb * tjj;
 
     mercier.DMerc[jF] = mercier.Dshear[jF] + mercier.Dcurr[jF] +
@@ -35822,8 +36019,8 @@ vmecpp::WOutFileContents vmecpp::ComputeWOutFileContents(
   // fixed-boundary run leaves it empty, as Fortran VMEC does.
   const Eigen::VectorXd& vacuum_potential = handover_storage.vacuum_potential;
   if (vacuum_potential.size() > 0) {
-    const int nf = s.ntor;
-    const int mf = s.mpol + 1;
+    const int nf = handover_storage.vacuum_ntor;
+    const int mf = handover_storage.vacuum_mpol + 1;
     const int mnpd = (2 * nf + 1) * (mf + 1);
     wout.potvac = VectorXd::Zero(2 * mnpd);
     if (vacuum_potential.size() <= wout.potvac.size()) {
@@ -36789,73 +36986,96 @@ std::vector<ProfileParameterizationData> BuildProfileParameterizations() {
   all.reserve(NUM_PARAM);
   all.emplace_back("---invalid---", /*allowedForPres=*/false,
                    /*allowedForCurr*/ false, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("power_series", /*allowedForPres=*/true,
                    /*allowedForCurr*/ true, /*allowedForIota*/ true,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("power_series_i", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("gauss_trunc", /*allowedForPres=*/true,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 2);
   all.emplace_back("sum_atan", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ true,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("two_lorentz", /*allowedForPres=*/true,
                    /*allowedForCurr*/ false, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 8);
   all.emplace_back("two_power", /*allowedForPres=*/true,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 3);
   all.emplace_back("two_power_gs", /*allowedForPres=*/true,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 3);
   all.emplace_back("akima_spline", /*allowedForPres=*/true,
                    /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 4,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("akima_spline_i", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 4,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("akima_spline_ip", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 4,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("cubic_spline", /*allowedForPres=*/true,
                    /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 4,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("cubic_spline_i", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 4,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("cubic_spline_ip", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 4,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("pedestal", /*allowedForPres=*/true,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("rational", /*allowedForPres=*/true,
                    /*allowedForCurr*/ true, /*allowedForIota*/ true,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("line_segment", /*allowedForPres=*/true,
                    /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 2,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("line_segment_i", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 2,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("line_segment_ip", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ true);
+                   /*minimumSplinePoints*/ 2,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("nice_quadratic", /*allowedForPres=*/false,
                    /*allowedForCurr*/ false, /*allowedForIota*/ true,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("sum_cossq_s", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("sum_cossq_sqrts", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   all.emplace_back("sum_cossq_s_free", /*allowedForPres=*/false,
                    /*allowedForCurr*/ true, /*allowedForIota*/ false,
-                   /*needsSplineData*/ false);
+                   /*minimumSplinePoints*/ 0,
+                   /*minimumCoefficients*/ 0);
   return all;
 }
 
@@ -36863,17 +37083,26 @@ std::vector<ProfileParameterizationData> BuildProfileParameterizations() {
 
 ProfileParameterizationData::ProfileParameterizationData(
     const std::string& name, bool allowedForPres, bool allowedForCurr,
-    bool allowedForIota, bool needsSplineData)
+    bool allowedForIota, int minimumSplinePoints, int minimumCoefficients)
     : name_(name),
-      needsSplineData_(needsSplineData),
+      minimumSplinePoints_(minimumSplinePoints),
+      minimumCoefficients_(minimumCoefficients),
       allowedFor_({.pres = allowedForPres,
                    .curr = allowedForCurr,
                    .iota = allowedForIota}) {}
 
 const std::string& ProfileParameterizationData::Name() const { return name_; }
 
+int ProfileParameterizationData::MinimumSplinePoints() const {
+  return minimumSplinePoints_;
+}
+
+int ProfileParameterizationData::MinimumCoefficients() const {
+  return minimumCoefficients_;
+}
+
 bool ProfileParameterizationData::NeedsSplineData() const {
-  return needsSplineData_;
+  return minimumSplinePoints_ > 0;
 }
 
 AllowedFor ProfileParameterizationData::IsAllowedFor() const {
@@ -38450,11 +38679,16 @@ class Vmec {
       OutputMode verbose = OutputMode::kLegacy,
       InterruptCallback interrupt_callback = nullptr);
 
+  // checkpoint_multi_grid_step selects which entry of ns_array the checkpoints
+  // taken in InitializeRadial fire on, counting from 1. Without it those
+  // checkpoints always stop the run in the first multi-grid step, which leaves
+  // the setup of every later step unreachable.
   absl::StatusOr<bool> run(
       const VmecCheckpoint& checkpoint = VmecCheckpoint::NONE,
       int iterations_before_checkpointing = INT_MAX,
       int maximum_multi_grid_step = 500,
-      std::optional<HotRestartState> initial_state = std::nullopt);
+      std::optional<HotRestartState> initial_state = std::nullopt,
+      int checkpoint_multi_grid_step = 1);
 
   // -------------------
 
@@ -38464,12 +38698,15 @@ class Vmec {
   // multigrid steps.
   void SetupVacuumSolvers();
 
+  // is_checkpoint_step says whether the multi-grid step being initialized is
+  // the one the caller asked to checkpoint in.
   absl::StatusOr<bool> InitializeRadial(
       VmecCheckpoint checkpoint, int maximum_iterations, int nsval, int ns_old,
       double& m_delt0,
       const std::optional<HotRestartState>& initial_state = std::nullopt,
       std::optional<MultigridInterpolationScheme> interpolation_scheme =
-          std::nullopt);
+          std::nullopt,
+      bool is_checkpoint_step = true);
   absl::StatusOr<bool> SolveEquilibrium(VmecCheckpoint checkpoint,
                                         int maximum_iterations);
   void RestartIteration(double& m_delt0r, int thread_id);
@@ -38526,6 +38763,8 @@ class Vmec {
 
   VmecINDATA indata_;
   Sizes s_;
+  // Fourier cutoffs of the vacuum potential on the plasma's tangential grid
+  Sizes vacuum_s_;
   FourierBasisFastPoloidal t_;
   Boundaries b_;
   VmecConstants constants_;
@@ -38793,10 +39032,23 @@ absl::StatusOr<std::unique_ptr<Vmec>> Vmec::FromIndata(
 }
 
 // initialize based on input file contents
+namespace {
+// Fourier cutoffs of the vacuum potential: the plasma's unless raised.
+int VacuumMpol(const vmecpp::VmecINDATA& indata) {
+  return std::max(indata.vacuum_mpol, indata.mpol);
+}
+int VacuumNtor(const vmecpp::VmecINDATA& indata) {
+  return std::max(indata.vacuum_ntor, indata.ntor);
+}
+}  // namespace
+
 Vmec::Vmec(const VmecINDATA& indata, std::optional<int> max_threads,
            OutputMode verbose, InterruptCallback interrupt_callback)
     : indata_(indata),
       s_(indata_),
+      vacuum_s_(indata_.lasym, indata_.nfp, VacuumMpol(indata_),
+                VacuumNtor(indata_), s_.ntheta, s_.nZeta, VacuumMpol(indata_),
+                VacuumNtor(indata_)),
       t_(&s_),
       b_(&s_, &t_, indata_.signgs),
       h_(&s_),
@@ -38816,11 +39068,11 @@ Vmec::Vmec(const VmecINDATA& indata, std::optional<int> max_threads,
   fc_.haveToFlipTheta = b_.setupFromIndata(indata_, verbose_);
 
   if (fc_.lfreeb) {
-    // tangential Fourier resolution
+    // tangential Fourier resolution of the vacuum potential
     // 0 : ntor
-    int nf = s_.ntor;
+    int nf = vacuum_s_.ntor;
     // 0 : (mpol + 1)
-    int mf = s_.mpol + 1;
+    int mf = vacuum_s_.mpol + 1;
     int mnpd = (2 * nf + 1) * (mf + 1);
     // For lasym = true the scalar potential carries both sin(mu-nv) and
     // cos(mu-nv) coefficients, doubling the Nestor linear system to
@@ -38829,6 +39081,7 @@ Vmec::Vmec(const VmecINDATA& indata, std::optional<int> max_threads,
     matrixShare.setZero(mnpd_dim * mnpd_dim);
     bvecShare.setZero(mnpd_dim);
 
+    h_.SetVacuumCutoffs(vacuum_s_.mpol, vacuum_s_.ntor);
     h_.vacuum_magnetic_pressure.setZero(s_.nZnT);
     h_.initial_plasma_pressure_at_boundary.setZero(s_.nZnT);
     h_.initial_vacuum_pressure_at_boundary.setZero(s_.nZnT);
@@ -38844,7 +39097,8 @@ Vmec::Vmec(const VmecINDATA& indata, std::optional<int> max_threads,
 absl::StatusOr<bool> Vmec::run(const VmecCheckpoint& checkpoint,
                                const int iterations_before_checkpointing,
                                const int maximum_multi_grid_step,
-                               std::optional<HotRestartState> initial_state) {
+                               std::optional<HotRestartState> initial_state,
+                               const int checkpoint_multi_grid_step) {
   if (maximum_multi_grid_step < 1) {
     return absl::InvalidArgumentError(
         absl::StrFormat("maximum_multi_grid_step must be at least 1, but is %d",
@@ -38989,9 +39243,12 @@ absl::StatusOr<bool> Vmec::run(const VmecCheckpoint& checkpoint,
       // initialize ns-dependent arrays
       // and (if previous solution is available) interpolate to current ns
       // value
-      const absl::StatusOr<bool> initialized =
-          InitializeRadial(checkpoint, iterations_before_checkpointing,
-                           fc_.nsval, fc_.ns_old, fc_.delt0r, initial_state);
+      // igrid is the index into ns_array; the inserted ns=3 stage runs at
+      // igrid = -1 and is never a checkpoint step.
+      const bool is_checkpoint_step = igrid == checkpoint_multi_grid_step - 1;
+      const absl::StatusOr<bool> initialized = InitializeRadial(
+          checkpoint, iterations_before_checkpointing, fc_.nsval, fc_.ns_old,
+          fc_.delt0r, initial_state, std::nullopt, is_checkpoint_step);
       if (!initialized.ok()) {
         return initialized.status();
       }
@@ -39143,7 +39400,7 @@ void Vmec::SetupVacuumSolvers() {
 
     if (indata_.free_boundary_method == FreeBoundaryMethod::NESTOR) {
       fb_vac_[vac_thread_id] = std::make_unique<Nestor>(
-          &s_, tp_vac_[vac_thread_id].get(), &mgrid_,
+          &vacuum_s_, tp_vac_[vac_thread_id].get(), &mgrid_,
           std::span<double>(matrixShare.data(), matrixShare.size()),
           std::span<double>(bvecShare.data(), bvecShare.size()),
           std::span<double>(h_.vacuum_magnetic_pressure.data(),
@@ -39156,7 +39413,7 @@ void Vmec::SetupVacuumSolvers() {
                             vacuum_reduce_slots_.size()));
     } else if (indata_.free_boundary_method == FreeBoundaryMethod::ONLY_COILS) {
       fb_vac_[vac_thread_id] = std::make_unique<OnlyCoils>(
-          &s_, tp_vac_[vac_thread_id].get(), &mgrid_,
+          &vacuum_s_, tp_vac_[vac_thread_id].get(), &mgrid_,
           std::span<double>(h_.vacuum_magnetic_pressure.data(),
                             h_.vacuum_magnetic_pressure.size()),
           std::span<double>(h_.vacuum_b_r.data(), h_.vacuum_b_r.size()),
@@ -39177,7 +39434,8 @@ absl::StatusOr<bool> Vmec::InitializeRadial(
     VmecCheckpoint checkpoint, int iterations_before_checkpointing, int nsval,
     int ns_old, double& m_delt0,
     const std::optional<HotRestartState>& initial_state,
-    std::optional<MultigridInterpolationScheme> interpolation_scheme) {
+    std::optional<MultigridInterpolationScheme> interpolation_scheme,
+    bool is_checkpoint_step) {
   // Stage info output is now handled by logger_.BeginStage() in run().
 
   // Set timestep control parameters
@@ -39303,7 +39561,8 @@ absl::StatusOr<bool> Vmec::InitializeRadial(
       return current_profile_status;
     }
 
-    if (checkpoint == VmecCheckpoint::SPECTRAL_CONSTRAINT &&
+    if (is_checkpoint_step &&
+        checkpoint == VmecCheckpoint::SPECTRAL_CONSTRAINT &&
         iterations_before_checkpointing <= 1) {
       // break the loop over thread_id here to check spectral constraint static
       // data; need to have all "threads" initialized before being able to test
@@ -39354,7 +39613,8 @@ absl::StatusOr<bool> Vmec::InitializeRadial(
     // VmecConstants::rmsPhiP, can update lamscale.
     constants_.lamscale = sqrt(constants_.rmsPhiP * fc_.deltaS);
 
-    if (checkpoint == VmecCheckpoint::RADIAL_PROFILES_EVAL &&
+    if (is_checkpoint_step &&
+        checkpoint == VmecCheckpoint::RADIAL_PROFILES_EVAL &&
         iterations_before_checkpointing <= 1) {
       return true;
     }
@@ -39389,7 +39649,8 @@ absl::StatusOr<bool> Vmec::InitializeRadial(
                                                             *p_[thread_id]);
       }
     }
-    if (checkpoint == VmecCheckpoint::SETUP_INITIAL_STATE &&
+    if (is_checkpoint_step &&
+        checkpoint == VmecCheckpoint::SETUP_INITIAL_STATE &&
         iterations_before_checkpointing <= 1) {
       return true;
     }
@@ -39404,7 +39665,10 @@ absl::StatusOr<bool> Vmec::InitializeRadial(
       //
       // No iteration guard here, unlike the checkpoints inside the solver
       // loop: this one sits between multigrid steps and fires once per step,
-      // so a condition on the iteration counter would not mean anything.
+      // so a condition on the iteration counter would not mean anything. It
+      // is not gated on the checkpoint step either: INTERP is only reached
+      // when interpolating from a coarser grid, so it cannot occur in the
+      // first multi-grid step at all.
       if (checkpoint == VmecCheckpoint::INTERP) {
         return true;
       }

@@ -125,7 +125,7 @@ Ubuntu 26.04 against the pinned dependency versions. Every case in upstream's
 `test_data` was run single-threaded by both binaries and the resulting HDF5
 files compared dataset by dataset with `tools/compare_outputs.py`.
 
-All 20 cases came out bit-for-bit identical, 454 datasets each and 458 for the
+All 20 cases came out bit-for-bit identical, 456 datasets each and 460 for the
 five `lasym` cases. They cover fixed boundary (`solovev`, `solovev_analytical`,
 `solovev_no_axis`, `circular_tokamak`, `cma`, `near_axis_iota_nfp4`,
 `li383_low_res`, `cth_like_fixed_bdy`, `cth_like_fixed_bdy_iota`,

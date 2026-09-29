@@ -1,7 +1,7 @@
 VMEC++ pull requests from github.com/proximafusion/vmecpp that are open, or were
 opened on or after 2026-04-25 and closed without merging, taken
-2026-09-28 20:18 UTC: 65 open, 64 closed. The amalgamation beside this file is
-built from github.com/proximafusion/vmecpp v0.7.5-36-g5f4045db; the changes of
+2026-09-29 17:11 UTC: 56 open, 70 closed. The amalgamation beside this file is
+built from github.com/proximafusion/vmecpp v0.7.5-43-g2b46babc; the changes of
 merged pull requests are in it, and those pull requests are not listed here.
 
 Each entry gives the pull request's title and state, then its description and
@@ -643,20 +643,12 @@ It's ok! I have some fixes to make anyways in the meantime.
 --- comment by jons-pf, 2026-06-11 01:52 UTC ---
 WOW! Like @jurasic-pf I'll need a bit of time to digest this (as for your other marvelous PRs 😬 👍 ), but this looks really promising. Thanks already now in advance for proposing these!
 
---- inline thread on vmecpp/common/flow_control/flow_control.cc:41 ---
+--- inline thread on vmecpp/common/flow_control/flow_control.cc:41 (outdated) ---
 > jurasic-pf, 2026-06-26 21:25 UTC:
 please keep these comments
 
 > CharlesCNorton, 2026-09-22 22:43 UTC:
 @jurasic-pf ok all addressed
-
-
-=== PR #563 [OPEN] Add some outputs documentation. ===
-
---- description by jons-pf, 2026-06-13 07:13 UTC ---
-(empty)
-
---- review by jurasic-pf, 2026-08-22 08:27 UTC: APPROVED ---
 
 
 === PR #610 [OPEN] Opt-in CUDA-Enzyme half-grid Jacobian JVP ===
@@ -808,28 +800,6 @@ Part 4/4, stacked on https://github.com/proximafusion/vmecpp/pull/638.
 
 --- description by jurasic-pf, 2026-08-23 12:44 UTC ---
 `__init__.py` had grown too large. As a result `_continuation.py` had to avoid circular imports when accessing `VmecInput`/`VmecOutput`/`run`
-
-
-=== PR #755 [OPEN] Run the multi-grid reference tests for every ns_array entry ===
-
---- description by CharlesCNorton, 2026-09-01 00:51 UTC ---
-**Change** - `CheckRadialProfiles` and `CheckMultigridResult` run every entry of `ns_array`, not only the first. `Vmec::run` gains `checkpoint_multi_grid_step`, default 1, which selects the multi-grid step the `SPECTRAL_CONSTRAINT`, `RADIAL_PROFILES_EVAL` and `SETUP_INITIAL_STATE` checkpoints of `InitializeRadial` fire in. `INTERP` stays ungated, since it is only reached when interpolating from a coarser grid. The `CheckRadialProfiles` reference filenames take a retry index of 0 in place of `get_num_eqsolve_retries()`.
-
-**Cause** - educational_VMEC dumps `profil1d`, `profil3d` and `multigrid_result` for every entry of `ns_array`, but the checkpoints in `InitializeRadial` fired in whichever step came first, which left the setup of every later step unreachable, and both tests carried a TODO limiting them to the first step. `get_num_eqsolve_retries()` is cumulative across steps, while the trailing index of the dumps counts retries within a step, which at a setup checkpoint is zero.
-
-**Evidence** - worst deviation of `CheckMultigridResult` from the reference per step, and the bound the test holds it to:
-
-| case | steps (ns) | worst | bound |
-|---|---|---|---|
-| solovev | 5, 11, 55 | 1.4e-15, 1.2e-13, 5.5e-12 | 5e-15, 1e-12, 5e-11 |
-| solovev_no_axis | 5, 11 | 3.2e-15, 2.2e-14 | 5e-15, 2e-13 |
-| cma | 25, 51 | 7.5e-13, 1.4e-11 | 1e-11, 1e-10 |
-
-The deviation grows with each step, since a later step starts from the interpolated solution of the previous one. In `CheckRadialProfiles` only solovev needs a bound per step: `DBL_EPSILON / 2`, 5e-16 and 5e-16.
-
-**Tests** - the two tests themselves. Their `DataSource` gains `multigrid_tolerances`, one entry per `ns_array` entry; left empty, every step uses `tolerance`.
-
-**Scope** - `checkpoint_multi_grid_step` defaults to 1 and `is_checkpoint_step` to true, so existing callers checkpoint in the first step as before. No solver arithmetic changes.
 
 
 === PR #765 [OPEN] Add proof-carrying equilibrium certificates via Stellarocq ===
@@ -1117,20 +1087,6 @@ The conda job has no git-lfs, so it read the reference wout as a pointer file; t
 Follow-up commit deselects the new Python test there, moves the LFS rule into src/vmecpp/cpp/.gitattributes, and trims the C++ test sweep.
 
 
-=== PR #803 [OPEN] Take indata2json at the commit that keeps a trailing zero spline value ===
-
---- description by CharlesCNorton, 2026-09-06 16:21 UTC ---
-**Change** - the `indata2json` pin moves from `f59e3dd` to `df7e911`, the commit of jonathanschilling/indata2json#12, which sizes both arrays of a spline pair from the knot array.
-
-**Cause** - at `f59e3dd` the converter trimmed the trailing zeros of `am_aux_f`, `ai_aux_f` and `ac_aux_f` independently of their knot arrays. An INDATA file whose spline profile ends at exactly zero, the ordinary case for a pressure or current profile, converted to a JSON with one value fewer than knots, and `VmecINDATA::FromJson` rejected it.
-
-**Evidence** - the shipped `input.cth_like_fixed_bdy_spline_pressure` could not be loaded through `VmecInput.from_file`; at the new pin it loads with all 201 knots and values.
-
-**Tests** - `test_ensure_vmecpp_input_keeps_trailing_zero_spline_value` in `tests/test_init.py` loads the shipped spline INDATA and requires 201 knots and values equal to the shipped JSON; it fails at the previous pin.
-
-**Scope** - the INDATA conversion only; JSON inputs do not pass through `indata2json`.
-
-
 === PR #814 [OPEN, draft] Propose shipping Enzyme-enabled kernels in pip wheels (follow-up to #710) ===
 
 --- description by Copilot, 2026-09-06 21:23 UTC ---
@@ -1152,37 +1108,6 @@ This is a design proposal only, not an implementation. The actual toolchain and 
 
 --- comment by jurasic-pf, 2026-09-07 08:05 UTC ---
 @copilot Follow the implementation proposal added in this PR
-
-
-=== PR #816 [OPEN] Reject a profile that its evaluator cannot evaluate ===
-
---- description by CharlesCNorton, 2026-09-07 05:34 UTC ---
-**Change** - `IsConsistent` rejects a profile its evaluator cannot evaluate. The parameterization table records, per name, the knots a spline evaluator needs (4 for the Akima and cubic families, 2 for the line segments) and the coefficients a closed form needs (`gauss_trunc` 2, `two_power` and `two_power_gs` 3, `two_lorentz` 8; the zero-padded power series accept any count), and `CheckProfile` rejects an input that carries fewer. Spline knots must increase strictly, and the Akima and cubic families, which are evaluated only inside their knots, must run from 0 to 1; the line segments continue their end segments and may stop short. `NeedsSplineData()` becomes the knot count being positive, so its one caller is unchanged.
-
-**Cause** - `CheckProfile` required a spline profile to carry knots and the two arrays to have the same length, but not to be long enough to evaluate. Below their counts the evaluators return `0.0` for every `s` after one warning: `evalAkima` and `evalCubic` need four knots, `evalLineSegment` two, and `gauss_trunc`, `two_power`, `two_power_gs` and `two_lorentz` need 2, 3, 3 and 8 coefficients. The Akima and cubic evaluators also return `0.0` outside their knots. That is the failure the validation added in #719 exists to prevent, in its own words: an unusable parameterization "reaches the solver as a zero profile, which converges to a silently wrong equilibrium." Fortran VMEC halts instead. `profile_functions.f` counts the knots and stops before the evaluator: `IF (i < 4) STOP 'pcurr: check s-grid for curr-grid values!'`, with the same guard on the pressure and iota branches.
-
-**Evidence** - `cth_like_fixed_bdy.json` unchanged, and then with `pmass_type = "cubic_spline"` over three and four knots, on main:
-
-| | `two_power` (as shipped) | `cubic_spline`, 3 knots | `cubic_spline`, 4 knots |
-|---|---|---|---|
-| exit | converged | converged | converged |
-| `presf(0)` | 4.322928e+02 | 0.000000e+00 | 4.322908e+02 |
-| `betatotal` | 1.926384e-03 | 0.000000e+00 | 1.681736e-03 |
-| iterations | 121 | 119 | 121 |
-
-The three-knot run writes a `wout` reporting a converged zero-pressure equilibrium while the input asked for 432 Pa. With `ncurr = 1` the same holds for the prescribed current, as in #798.
-
-**Tests** - in `vmec_indata_test`: `CheckSplineProfilesNeedEnoughKnots` drives the three spline families one knot short of and at their minimum for the pressure profile and holds the current and iota profiles to the same counts; `CheckClosedFormProfilesNeedEnoughCoefficients` does the same for the four closed forms; `CheckSplineKnotsIncreaseAndSpanTheRadius` rejects unordered and repeated knots and Akima or cubic knots that stop short of 0 or 1, and accepts line segments that do.
-
-**Scope** - validation only; the evaluators are untouched. An input rejected now is one whose profile evaluated to zero over part or all of the radius.
-
---- comment by CharlesCNorton, 2026-09-07 05:54 UTC ---
-The opt failure is Threed1ShafranovIntegralsTest/cma at 5.462e-11 against its 5.0e-11 bound, in a test this PR cannot reach: cma uses power_series, whose minimum knot count is zero, so the new check never fires. It passes locally at opt on this branch. #764, now unstacked and standalone, raises that bound to 5.0e-10 from the measured 4.08e-11.
-
---- comment by CharlesCNorton, 2026-09-08 14:55 UTC ---
-Extended to the other ways a profile reaches the solver as zero. The closed-form parameterizations have the same gap as the splines: below their coefficient count `gauss_trunc`, `two_power`, `two_power_gs` and `two_lorentz` log a warning and return zero for every s, so `pmass_type = two_power` with `am = [1000]` converges to a zero-pressure equilibrium; the table now carries the count each needs (2, 3, 3, 8) beside the knot count. The spline evaluators walk their knots in order and the Akima and cubic ones return zero outside them, where Fortran VMEC stops with `iflag = -2` and `-1`; knots out of order gave a different equilibrium without a message (beta 1.80e-3 against 1.68e-3 for the same five points on `cth_like_fixed_bdy`), and knots ending at 0.9 gave zero pressure beyond them. `IsConsistent` now requires strictly increasing knots for every spline and knots from 0 to 1 for the Akima and cubic families; the line segments continue their end segments and may stop short. `CheckClosedFormProfilesNeedEnoughCoefficients` and `CheckSplineKnotsIncreaseAndSpanTheRadius` cover it.
-
---- review by jurasic-pf, 2026-09-25 21:46 UTC: APPROVED ---
 
 
 === PR #820 [OPEN] Add an opt-in undamped lambda preconditioner ===
@@ -1239,6 +1164,14 @@ Oh, that's very cool!
 --- comment by jurasic-pf, 2026-09-07 12:41 UTC ---
 I'll try to review properly in the upcoming week
 
+--- inline thread on src/vmecpp/__init__.py:445 ---
+> jurasic-pf, 2026-09-29 09:07 UTC:
+How about exposing the floating point value of `kLambdaPreconditionerDampingFactor` directly instead of a boolean flag? Let's expose it rescaled such that 1.0 == no damping, <1.0 daming, >1.0 accelerated 
+and briefly explain the effect in the docstring
+
+--- review by jurasic-pf, 2026-09-29 09:07 UTC: CHANGES_REQUESTED ---
+Let's expose float instead of bool
+
 
 === PR #823 [OPEN, draft] feat(solver): Residual-Aware Dynamic Preconditioning (RAD-P) for Issue #818 ===
 
@@ -1290,36 +1223,8 @@ Notable: `quasr_65579` -915 iterations (-27.2%), `up_down_asym` -105 iterations 
 
 --- review by jurasic-pf, 2026-09-25 23:12 UTC: APPROVED ---
 
-
-=== PR #833 [OPEN] Let the vacuum potential's Fourier cutoffs exceed the plasma's ===
-
---- description by CharlesCNorton, 2026-09-08 15:55 UTC ---
-**Change** - `VmecInput.vacuum_mpol` and `VmecInput.vacuum_ntor` set the Fourier cutoffs of NESTOR's scalar potential independently of the plasma's `mpol` and `ntor`, which they default to. The potential and the vacuum field keep the plasma's tangential grid; the boundary is zero-padded into the larger layout, `nzeta` has to carry the toroidal cutoff, and `potvac` is written at the potential's own size.
-
-**Cause** - Fortran VMEC expands the vacuum potential to `mf = mpol + 1`, `nf = ntor`, so the vacuum solution is truncated at the plasma's resolution. On the cth boundary that truncation, not the singular quadrature, is the floor #628 discusses: an exact exterior Neumann problem (a line of dipoles inside the surface, whose total field on it is zero) gives a residual of 5.3e-3 relative to the external field with `ntor = 4` for the potential at any `mpol` up to 32 and any grid up to `ntheta = 160`, `nzeta = 288`, and 4.8e-4 with the potential at `ntor = 8`. Against BIEST at twelve digits on the real cth vacuum field, NESTOR's rms error at `mpol = 16` is 1.42e-3 with `ntor = 4`, 3.5e-4 at 6, 9.9e-5 at 8 and 7.3e-5 at 12.
-
-**Evidence** - in the loop on `cth_like_free_bdy` at `ftol = 1e-11` the change moves the boundary by tens of micrometres at its 0.19 percent beta and by 0.27 mm (`mpol = 5`) to 1.3 mm (`mpol = 8`) in `rmax_surf` at 2.1 percent beta on the wide mgrid; the axis moves by up to 76 micrometres. The numbers above were measured with the cross-term sign of #825; with the historical sign the vacuum error stays at 6.9e-3 for every cutoff, so the two changes only pay together.
-
-**Tests** - `VacuumCutoffsStayAboveThePlasmaResolution` in `vmec_indata_test` (defaults, rejection below the plasma's cutoffs and of an `nzeta` that cannot carry `vacuum_ntor`, JSON round trip), `VacuumPotentialCutoffsAboveThePlasmaResolution` in `vmec_in_memory_mgrid_test` (the expanded run converges on the same grid, reports `potvac` at its size and stays within the vacuum resolution change of the base run), `test_vacuum_potential_cutoffs` in `tests/test_free_boundary.py`.
-
-**Scope** - defaults are bit-identical to main: the vacuum `Sizes` equals the plasma's and the hand-off layout is unchanged. Raising the cutoffs costs only the vacuum solve, which grows with the potential's mode count.
-
---- comment by CharlesCNorton, 2026-09-08 17:25 UTC ---
-fixing
-
-
-=== PR #834 [OPEN] Reject an external field without stellarator symmetry when lasym is false ===
-
---- description by CharlesCNorton, 2026-09-08 17:17 UTC ---
-**Change** - a free-boundary run with `lasym = false` now rejects an external field that is not stellarator symmetric. `Vmec::run` samples the field on the initial boundary and on its mirror image and returns `kInvalidArgument` when the rms antisymmetric part exceeds 1e-4 of the field, naming the measured value; `lasym = true` is unaffected.
-
-**Cause** - with `lasym = false` the vacuum solver samples the external field on the poloidal half range and the transforms extend it by stellarator symmetry, so a field with an antisymmetric part is replaced by a different field without any message, as in Fortran VMEC. The equilibrium then differs from the one the field produces: the cth coils raised by 0.2 mm, whose only physical effect is a rigid 0.2 mm shift of the plasma, move `rmax_surf` by 0.7 mm and the edge iota by 6e-4 relative to the `lasym = true` result; at 1 mm the boundary is off by 3.6 mm, at 5 mm by 26 mm and the edge iota by 2 percent. On an exact exterior Neumann problem (an interior current loop 6 cm off the axis) the symmetric path reports the enclosed current with a 14 percent error.
-
-**Evidence** - the antisymmetric part on the cth boundary is 3.2e-4 of the field for the 0.2 mm shift, 1.6e-3 for 1 mm and 7.9e-3 for 5 mm, and the boundary error of the `lasym = false` run is about twice that fraction of `rmax_surf`; the shipped cth field measures 2e-14 and the Solovev free-boundary field 6e-8. At the limit of 1e-4 the coils are off by 0.06 mm and the unnoticed boundary error would be 0.2 mm. Every free-boundary case in the test suites passes the check.
-
-**Tests** - `ExternalFieldWithoutStellaratorSymmetryNeedsLasym` in `vmec_in_memory_mgrid_test` (the raised coils rejected with `lasym = false`, accepted with `lasym = true`) and `test_external_field_without_stellarator_symmetry_needs_lasym` in `tests/test_free_boundary.py`.
-
-**Scope** - the check runs once per `run`, costs two interpolations of the boundary, and only fires for `lasym = false` free-boundary runs whose field fails the symmetry by more than the limit; a boundary outside the vacuum grid is still reported by the vacuum solver.
+--- comment by jurasic-pf, 2026-09-29 08:49 UTC ---
+@copilot resolve the merge conflicts in this pull request
 
 
 === PR #839 [OPEN] Hand every force iteration to a callback and watch a solve converge ===
@@ -1345,6 +1250,27 @@ fixing
 
 --- comment by CharlesCNorton, 2026-09-22 18:03 UTC ---
 enhancing
+
+--- inline thread on src/vmecpp/__init__.py:2470-2482 ---
+> jurasic-pf, 2026-09-29 08:53 UTC:
+Can we make this a Python object (dataclass, or BaseModelWithNumpy)?
+
+For Python users, it's hard to understand how to interact with an opaque object handed from the C++ backend. That's the reason why we have all the parallel objects implemented python side in the first place.
+
+--- review by jurasic-pf, 2026-09-29 08:57 UTC: APPROVED ---
+I really like this change. Minor comments
+
+--- inline thread on vmecpp/vmec/vmec/vmec.cc:1528 ---
+> jurasic-pf, 2026-09-29 08:59 UTC:
+EquilibriumState
+
+--- inline thread on vmecpp/vmec/vmec/vmec.h:69 ---
+> jurasic-pf, 2026-09-29 08:59 UTC:
+SolverState
+
+--- inline thread on src/vmecpp/__init__.py:2470 ---
+> jurasic-pf, 2026-09-29 08:59 UTC:
+SolverState
 
 
 === PR #843 [OPEN] Add a geometry tolerance that holds a run until the flux surfaces stop moving ===
@@ -1401,60 +1327,6 @@ A configuration that stops at the first step costs 13 percent of what it costs o
 **Scope** - unset, the multigrid loop is the one that was there and every existing test reproduces its iteration count. The check reads the residuals already in `FlowControl` and runs once per multigrid step. The HDF5 read is guarded on the dataset being present, so inputs written before this still load.
 
 
-=== PR #848 [OPEN] Say what the four underived iteration constants are ===
-
---- description by CharlesCNorton, 2026-09-09 21:03 UTC ---
-**Change** - `ideal_mhd_model.cc` says what `r1scale`, the free-boundary edge-force gate, the axis row of the preconditioned force norm and the growth of the constraint-force multiplier in `ns` are.
-
-**Cause** - four markers asked what the constants are.
-
-**Evidence** - `r1scale` is derivable. `fixaray.f90` sets `r0scale = mscale(0)*nscale(0)`, which is 1, and `residue.f90` forms `r1 = 1/(2*r0scale)**2`; with `mscale[m > 0] = nscale[n > 0] = sqrt(2)` the product is 2 for a mode with both indices non-zero, so 0.25 is the reciprocal of its square.
-
-The edge-force gate needs `iter2 - iter1 < 50` and `fsqr + fsqz < 1e-6` together, and on a cold run the two never hold at once. Forcing the window shut so the term can never fire leaves `cth_like_free_bdy` at 489 iterations, `solovev_free_bdy` at 630 and `cth_like_free_bdy_multigrid` at 320, which is what they take as shipped, and making the tolerance always true leaves the same three numbers. Removing the window instead takes them to 598, 790 and 393.
-
-The axis row of `fnorm1`, measured against the sum over all surfaces at the first three preconditioner updates, contributes 2.9 percent on `cma`, 1.7 on `near_axis_iota_nfp4`, 0.7 on `li383_low_res`, 0.4 on `w7x`, 0.2 on `cth_like_fixed_bdy` and nothing on `solovev` or `up_down_asym`, whose `ntor = 0` leaves no axis coefficient outside the offset already excluded. Dropping it leaves all twelve bundled fixed-boundary cases at the same iteration count, axis position and MHD energy: `fsqr1` and `fsqz1` reach the iteration only through ratios of successive residuals, which a near-constant factor cancels out of.
-
-The growth in `ns` of the constraint-force multiplier, iterations at each case's own `ftol`, single-threaded, with the parabola and with it divided out:
-
-| case | ns | parabola | flat |
-| --- | --- | --- | --- |
-| `solovev` | 55 | 203 | 264 |
-| `solovev_analytical` | 31 | 399 | 447 |
-| `solovev_no_axis` | 11 | 133 | 130 |
-| `circular_tokamak` | 17 | 748 | 742 |
-| `cma` | 51 | 206 | 170 |
-| `cth_like_fixed_bdy` | 25 | 120 | 117 |
-| `cth_like_fixed_bdy_iota` | 25 | 117 | 116 |
-| `li383_low_res` | 16 | 123 | 122 |
-| `up_down_asym` | 17 | 593 | 593 |
-| `cth_like_fixed_bdy_asym` | 25 | 136 | 130 |
-| `near_axis_iota_nfp4` | 51 | 2038 | 2475 |
-| `w7x` | 99 | 2953 | 1739 |
-| total | | 7769 | 7045 |
-
-and a scan of constant multipliers over the four cases that move:
-
-| case | parabola | 1 | 1.5 | 2 | 3 | 4 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `solovev` | 203 | 264 | 228 | 205 | 189 | 203 |
-| `cma` | 206 | 170 | 207 | 191 | 186 | 186 |
-| `near_axis_iota_nfp4` | 2038 | 2475 | 2303 | 2150 | 2057 | 1874 |
-| `w7x` | 2953 | 1739 | 1918 | 2487 | 2857 | 3620 |
-
-`near_axis_iota_nfp4` improves monotonically out to 4 while `w7x` worsens monotonically over the same range, and every case converges to the same equilibrium either way.
-
-**Tests** - `bazel test --config=opt //vmecpp/...` is 24 of 24 and `//vmecpp_large_cpp_tests/...` is 20 of 20. Pre-commit clean.
-
-**Scope** - comments only.
-
---- inline thread on vmecpp/vmec/ideal_mhd_model/ideal_mhd_model.cc:975-976 (outdated) ---
-> jurasic-pf, 2026-09-09 21:23 UTC:
-What does this mean? How can we know that's true for any equilibrium, I don't remember a branch at 50 niter?
-
-> CharlesCNorton, 2026-09-09 21:35 UTC:
-There is no branch at 50: `iter1` is set at the start of a multigrid stage and at every bad-Jacobian restart, so `iter2 - iter1` counts iterations since whichever came last. The comment now says that and your TODO is back, since the claim held only on cth_like_free_bdy, solovev_free_bdy and cth_like_free_bdy_multigrid, where the two conditions never coincide, and a bad-Jacobian restart occurring after the residuals pass 1e-6 would make both hold.
-
-
 === PR #849 [OPEN] Pin the m=1 gauge in VmecModel so the equilibrium and its Jacobian are functions of the boundary ===
 
 --- description by jurasic-pf, 2026-09-12 15:25 UTC ---
@@ -1497,186 +1369,6 @@ Cost and accuracy of the pinned solve, same case:
 Existing tests: `tests/test_autodiff.py`, `test_geometry.py` (8 passed, 1 skipped: the no-Enzyme fallback test), `test_hessian.py`, `test_iteration.py`, `test_internal_gradient.py`, `test_preconditioner.py` (31 passed) with the Enzyme-enabled build, `OMP_NUM_THREADS=1`. `pre-commit` (clang-format, ruff, docformatter, pyright) passes on the changed files.
 
 Runtime: `test_implicit_vjp_matches_the_pinned_gauge_re_solve` takes about 60 s, of which the adjoint GMRES solve (`rtol 1e-8`, restart 200) at ns 25, mpol 5, ntor 4 is the bulk; the 13 re-solves take under 2 s each.
-
-
-=== PR #855 [OPEN] autodiff: reuse the forward solve's model in the reverse callback ===
-
---- description by jurasic-pf, 2026-09-12 16:01 UTC ---
-# autodiff: reuse the forward solve's model in the reverse callback
-
-## Scope
-
-`DifferentiableVmec._backward_callback` re-solved the equilibrium from scratch
-on every call, so a single `jax.value_and_grad` paid for two nonlinear solves.
-Any solver failure, or a non-converged GMRES adjoint solve (`info != 0`),
-raised inside the JAX callback, which aborts an optimizer's line search rather
-than letting it backtrack.
-
-This change only touches `_backward_callback`'s model acquisition and adds an
-opt-in failure mode; it does not change the adjoint algorithm itself (that is
-the direct-solve branch stacked on top).
-
-## Change
-
-- Added `_ModelCache`, a small LRU cache (`collections.OrderedDict`-backed)
-  from `boundary.tobytes()` to the converged `VmecModel`. `_solve_model_cached`
-  looks the model up before falling back to `_solve_model`.
-- `DifferentiableVmec` gained `cache_size: int = 4` and
-  `on_failure: Literal["raise", "nan"] = "raise"`, threaded through
-  `make_solver(vmec_input, *, cache_size=4, on_failure="raise")`. Both
-  `_forward_callback` and `_backward_callback` now go through the shared
-  per-solver cache, so the model produced by a forward call is available to
-  the backward call `jax.custom_vjp` invokes for the same primal value.
-- With `on_failure="nan"`, a forward solver exception or a backward adjoint
-  exception is caught, reported with `warnings.warn`, and replaced by an
-  all-NaN output/cotangent of the expected shape, instead of propagating out
-  of the `jax.pure_callback`. Defaults are unchanged
-  (`cache_size=4`, `on_failure="raise"`), so existing callers see no behavior
-  change unless they opt in.
-
-## Tests and measurements
-
-New file `tests/test_autodiff_cache.py`:
-- `test_backward_reuses_the_cached_forward_model`: after a forward call, the
-  backward call for the same boundary makes zero additional `_solve_model`
-  calls (monkeypatched counter).
-- `test_cache_miss_falls_back_to_a_fresh_solve`: a different boundary triggers
-  its own solve.
-- `test_cache_evicts_the_least_recently_used_entry`: with `cache_size=1`, a
-  second boundary evicts the first, and a subsequent backward call for the
-  evicted boundary re-solves.
-- `test_cache_size_must_be_positive`, `test_on_failure_must_be_a_known_literal`:
-  input validation.
-- `test_on_failure_nan_warns_and_returns_nan_on_solver_failure` /
-  `..._on_adjoint_failure`: a monkeypatched failure in the solve or the
-  adjoint VJP is turned into a `UserWarning` plus a NaN-filled array of the
-  correct shape.
-- `test_on_failure_raise_is_the_default_and_propagates`: the default still
-  raises.
-
-All of `tests/test_autodiff.py`, `tests/test_geometry.py`,
-`tests/test_hessian.py`, and the new file pass against an Enzyme-enabled
-build (19 passed, 1 skipped — the skip is `has_exact_force_jacobian`-gated
-and unrelated to this change).
-
-**Wall time**, CTH-like fixed-boundary case, `ns=25`, `ftol=1e-14`, `ncurr=0`
-with the converged `ncurr=1` iota profile prescribed as an 8th-order power
-series (`ai`), single-core (`OMP_NUM_THREADS=1`), 3 repetitions of
-`jax.value_and_grad` on `sum(r_cc**2)`:
-
-| | run 1 | run 2 | run 3 | median |
-|---|---|---|---|---|
-| before (backward re-solves) | 49.79 s | 49.05 s | 40.41 s | 49.05 s |
-| after (backward reuses cache) | 37.67 s | 52.28 s | 49.38 s | 49.38 s |
-
-At this resolution the equilibrium solve itself takes about 2 s, while the
-GMRES adjoint solve (unchanged by this branch) takes on the order of 40-50 s,
-so removing the redundant equilibrium solve yields a small (roughly 4%)
-reduction of the total gradient wall time here; the run-to-run variance in
-GMRES iteration count dominates the measured spread. The absolute win grows
-in configurations where re-solving costs more relative to the adjoint (e.g.
-more multigrid steps, tighter `ftol`, more line-search evaluations per
-gradient in an outer optimizer that calls the forward pass repeatedly before
-ever asking for a gradient). Reducing the adjoint's own cost is addressed by
-the direct-solve branch stacked on top of this one.
-
-## Open issues
-
-- The cache holds full `VmecModel` C++ objects; `cache_size` bounds the count
-  but not per-model memory, which scales with `ns * mpol * (ntor + 1)`. Left
-  at a default of 4; callers doing large sweeps
-  over many boundaries in one process may want a smaller `cache_size`.
-
-
-=== PR #856 [OPEN] autodiff: expose the flat state layout as a public StateLayout ===
-
---- description by jurasic-pf, 2026-09-12 16:01 UTC ---
-# autodiff: expose the flat state layout as a public StateLayout
-
-## Scope
-
-The flat solver state (`VmecModel.get_state()`/`get_forces()`) is only
-accessible through private helpers (`_span_slices`, `_interior_and_boundary`,
-`_structural_nullfree_interior`, `_boundary_from_state_vjp`,
-`_cpp_geometry_flat`, `_solve_model`), so downstream code has no supported way
-to ask which flat index belongs to which coefficient span, surface, or mode.
-
-## Change
-
-- Added a public, frozen `StateLayout` dataclass and `state_layout(model)`
-  constructor. `StateLayout` has:
-  - `spans: dict[str, slice]` — the same span order as before, named.
-  - `surface: dict[str, np.ndarray]` / `mode: dict[str, np.ndarray]` — per-span
-    arrays giving each flat entry's surface index and its `(m, n)`-flattened
-    mode index within the surface.
-  - `boundary` / `interior` — partition the whole state (fixed `r`/`z` at the
-    last surface vs. everything else).
-  - `structural_zero` / `gauge` / `solved` — partition `interior`:
-    - `structural_zero`: DOFs with both a zero Hessian row and column (no
-      force depends on them and they produce no force) — unconstrained
-      gauge/parity modes.
-    - `gauge`: the m=1 constraint-gauge entries zeroed by
-      `FourierForces::zeroZForceForM1` (`z_cs` under `lthreed`, `z_cc` under
-      `lasym`). Their force row is identically zero, but unlike
-      `structural_zero`, their Hessian *column* is not: the state entry still
-      feeds the m=1 constraint coupling (`M1Constraint`) that other rows
-      depend on.
-    - `solved`: what `_structural_nullfree_interior` returned before this
-      change, i.e. the DOFs the adjoint system is actually solved for, with
-      the gauge rows now split out by name/mode instead of left folded into
-      the general row/column probe. `gauge` rows already fail the probe's
-      "row nonzero" test (since the force row is exactly zero), so they were
-      already excluded from the old `nullfree` set; this change only gives
-      that subset a name and an explicit, structural (not probed)
-      derivation.
-- `_span_slices` and `_interior_and_boundary` are now thin wrappers, kept for
-  the existing private call sites (`_boundary_from_state_vjp`,
-  `_implicit_boundary_vjp`, and the tests that probe them directly).
-- The module docstring gained a "State layout" section documenting the state
-  <-> `Geometry` correspondence: span order and which spans exist for a given
-  `lthreed`/`lasym` combination, the `(ns, mpol, ntor + 1)` surface-major block
-  layout matching `vmecpp.Geometry`/`get_geometry()`, and the `sqrt(2)` scaling
-  of `m, n != 0` modes relative to the external combined basis.
-- `StateLayout` and `state_layout` are added to `__all__`.
-
-## Tests and measurements
-
-New file `tests/test_autodiff_state_layout.py`, parameterized over a 2D
-(solovev) and a 3D model (the same construction
-`tests/test_autodiff.py::_small_3d_input` uses, so the `r_ss`/`z_cs`/`lambda_cs`
-blocks and the `z_cs` gauge rows are exercised):
-
-- `test_index_sets_partition_the_state`: `boundary ⊔ interior` covers the full
-  state with no overlap, and `structural_zero ⊔ gauge ⊔ solved` covers
-  `interior` with no overlap, for both the 2D and 3D cases.
-- `test_solved_matches_the_previous_structural_nullfree_interior`: `solved`
-  equals `_structural_nullfree_interior(model, interior)` minus `gauge`, i.e.
-  the previously-returned interior set, now split into gauge and solved.
-- `test_gauge_is_empty_in_two_dimensions`: the 2D case has no
-  `lthreed`/`lasym` blocks, so there is nothing for `zeroZForceForM1` to zero.
-- `test_gauge_force_rows_are_zero`: in the 3D case, `gauge` is nonempty and
-  the raw force at those indices is exactly zero (to `1e-12`).
-- `test_spans_partition_the_flat_state`: the named spans tile the flat state
-  with no gaps or overlaps.
-- `test_surface_and_mode_indices_agree_with_the_span_shape`: `surface`/`mode`
-  arrays have the right shape and range for each span.
-
-All of `tests/test_autodiff.py`, `tests/test_autodiff_cache.py` (from the
-stacked branch below this one), `tests/test_autodiff_state_layout.py`,
-`tests/test_geometry.py`, and `tests/test_hessian.py` pass: 27 passed,
-1 skipped (Enzyme-gated), against an Enzyme-enabled build.
-
-## Open issues
-
-- `state_layout`'s `n_probe`/`tol`/`seed` defaults match
-  `_structural_nullfree_interior`'s; a caller who wants a different
-  probe budget for a larger `mpol`/`ntor` can already pass them through, but
-  there is no guidance yet on how to size them for a much larger case (this
-  is inherited from the pre-existing probing, not new to this change).
-- `gauge` is derived from `zeroZForceForM1`'s `(m=1, all n)` rule read off the
-  C++ source rather than from a Hessian probe, so it is exact but tied to
-  that specific constraint; if a future constraint changes which entries are
-  gauge-fixed, this derivation needs a matching update.
 
 
 === PR #864 [OPEN] Extrapolate the full-grid ends from the interior alone ===
@@ -1735,6 +1427,9 @@ The mismatch is the measure of SIMSOPT's `VmecRedlBootstrapMismatch`. It is reco
 ## Scope
 
 The only change to VMEC++ is the two `VmecModel` accessors. The closure and the iteration of the current are in the example.
+
+--- comment by jurasic-pf, 2026-09-29 09:21 UTC ---
+This is pending merge and finalization of https://github.com/proximafusion/vmecpp/pull/839
 
 
 === PR #878 [OPEN] Shorten time steps that would make flux surfaces cross ===
@@ -1833,6 +1528,8 @@ Through the `lasym` path the retry reproduces the symmetric result: at 1, 2, 4 a
 
 **Scope** - runs whose initial Jacobian stays bad after the axis guess; every other run takes the path it took before. The dataset is under the MIT license.
 
+--- review by jurasic-pf, 2026-09-29 11:03 UTC: APPROVED ---
+
 
 === PR #892 [OPEN] Read CSV coefficient files that begin with a UTF-8 byte order mark ===
 
@@ -1919,37 +1616,6 @@ Instead of explicitly supporting N as a third mode, i would prefer normalizing i
 **Scope** - output only; the solve is unchanged.
 
 
-=== PR #904 [OPEN] Test that the energy Hessian is symmetric and DGeod is never positive ===
-
---- description by CharlesCNorton, 2026-09-27 11:41 UTC ---
-**Change** - adds the Bazel test `//vmecpp/vmec/vmec:energy_hessian_test` and the `circular_tokamak` and `li383_low_res` test-data targets: the derivative of the unpreconditioned force along a displacement, by central difference, is a symmetric form, `<u, H v> = <v, H u>`, for `solovev.json` and `circular_tokamak.json` at `tcon0 = 0`; and `DGeod` is not positive on any interior surface of seven test cases, three-dimensional and asymmetric ones included.
-
-**Cause** - where the force is the gradient of the energy, its derivative is the energy's Hessian, which is symmetric. `DGeod = <G B^2 / |grad s|^3>^2 - <G^2 B^2 / |grad s|^3> <B^2 / |grad s|^3>` is a Cauchy-Schwarz defect, so it is at most zero on every surface.
-
-**Evidence** - symmetric to 1e-6 of the scale for three pairs of displacements in both cases; `DGeod` at most 1e-12 of its largest magnitude on the interior surfaces of all seven cases.
-
-**Tests** - `EnergyHessianTest.IsSymmetric` on both inputs and `GeodesicCurvatureTest.IsNeverPositive` on the seven.
-
-**Scope** - tests only.
-
---- comment by CharlesCNorton, 2026-09-27 15:16 UTC ---
-porting Hessian and DGeod tests to C++
-
-
-=== PR #907 [OPEN] Reject a nonzero curtor on a current profile too small to be scaled ===
-
---- description by CharlesCNorton, 2026-09-27 13:27 UTC ---
-**Change** - with `ncurr = 1`, a nonzero `curtor` on a current profile whose value at the boundary is too small to be scaled, such as the default empty `ac` or `ac = [0, 0, 0]` with `power_series`, is now rejected with `kInvalidArgument` naming the profile, `I(1)` and `curtor`. The check runs in `CheckCurrentProfileEnclosesEdgeCurrent` after the one from #831 and applies the scaling condition of `evalRadialProfiles`, which both now call as `EdgeCurrentScalesToCurtor`. A vanishing profile with `curtor = 0` still runs.
-
-**Cause** - `evalRadialProfiles` scales the enclosed current profile to `curtor` only when `|I(1)| > |DBL_EPSILON * curtor|`, as `profil1d` does in Fortran VMEC, and leaves `Itor = 0` otherwise. The check from #831 fires only when some `|I(s)| > 0`, so a profile that is zero everywhere passed it and the run converged at zero current whatever `curtor` asked for.
-
-**Evidence** - `li383_low_res` (`curtor = -174250` A, `power_series`) converges with its own `ac` to `ctor = -177181` A. On main, `ac = []` and `ac = [0, 0, 0]` converge to `ctor = 7.5e-10` A with nothing on stdout or stderr and no Python warning. With this change both stop before the first iteration with `the current profile 'power_series' has I(1) = 0.000e+00 at the boundary, too small to be scaled to curtor = -1.742e+05`, as does `ac = [1e-30]` with `I(1) = 1.000e-30`, while `ac = [1, -2]` meets the message from #831 as before and `ac = []` with `curtor = 0` converges as on main.
-
-**Tests** - `RejectsANonzeroCurtorOnAVanishingCurrentProfile` in `vmec_test` runs `cth_like_fixed_bdy` with `power_series` and the empty `ac`, a zero `ac` and `I(s) = 1e-30 s`, expects `kInvalidArgument` for each, and runs the empty profile with `curtor = 0`. It fails on main, where the first of these runs succeeds.
-
-**Scope** - the check applies the condition the solver scales by, so an input is rejected exactly when it would have run without current, which Fortran VMEC does silently. Every shipped input with `ncurr = 1` and a vanishing profile, such as `cma.json` and `near_axis_iota_nfp4.json`, sets `curtor = 0` and runs as before.
-
-
 === PR #908 [OPEN] Evaluate the state a run returns when it runs out of iterations ===
 
 --- description by CharlesCNorton, 2026-09-27 13:27 UTC ---
@@ -1962,6 +1628,80 @@ porting Hessian and DGeod tests to C++
 **Tests** - `OutputAtTheIterationLimitDescribesTheReturnedState` in `vmec_test` runs `cth_like_fixed_bdy` for 59 iterations, halts a second run at its 60th evaluation, which is at the state the first returns, and requires `fsqr`, `fsqz`, `fsql`, `wb` and `wp` of the first output to equal those of the second run bitwise. `OutputAtTheIterationLimitReportsABadJacobian` runs one iteration of `cth_like_fixed_bdy` with `delt = 5` and expects `BAD_JACOBIAN`. Both fail on main.
 
 **Scope** - converged runs do not reach the new evaluation, and a run that ends at the iteration limit costs one more force evaluation. As for a converged run, the residual traces (`force_residual_r`, `fsqt` and the others) end at the last iteration and leave out the evaluation of the returned state. Unlike Fortran VMEC, the output reports the residuals of the returned state rather than those of its last iteration.
+
+
+=== PR #912 [OPEN] Check VMEC++ against exact three-dimensional MHD equilibria in CI ===
+
+--- description by CharlesCNorton, 2026-09-29 08:19 UTC ---
+**Change** - `examples/exact_equilibria.py` writes VMEC++ inputs for members of both families of exact equilibria in Landreman, [arXiv:2609.26742](https://arxiv.org/abs/2609.26742) (with the data of [landreman/analytic_3d_equilibria](https://github.com/landreman/analytic_3d_equilibria)), runs VMEC++ over radial and angular resolutions, and measures against the exact solution, at VMEC++'s own points, quantities that do not depend on its poloidal angle: `psi` on each full-grid surface against the surface's flux label, the magnetic axis, the field vector at the half-grid points, the enclosed toroidal current `buco` and its radial derivative `jcurv`, the last three also for `s >= 1/4`, and `buco / s` at the innermost half-grid point against its exact limit at the axis. The runs of `sheared` start from the coarser grids of 25, 100 and 400 below their `ns`, and every grid runs to `ftol = 1e-18` up to `ns = 200` and to `1e-16` above. The script prints the deviations with their observed orders in `h = 1/(ns - 1)`, writes them with `--out` as JSON and markdown with plots against `h`, against `mpol` and of `buco / s` over `s`, and ends with five checks on `sheared`:
+
+- convergence in `ns` at O(h): `psi`, the axis, `B` and the current converge at fitted order >= 0.9;
+- convergence in `mpol`, `ntor`: `B` for `s >= 1/4` falls at every step of the angular scan, and `psi`, the axis and `B` for `s >= 1/4` fall at least 100-fold from `mpol = 4`, `ntor = 2` to `mpol = 8`, `ntor = 6`;
+- the magnetic axis converges at fitted order >= 0.9 and lies within `2e-4 h` metres of the exact axis at the finest `ns`;
+- `B` for `s >= 1/4` converges at fitted order >= 1.5, and `jcurv` at a lower order than the current it differentiates, over the whole profile and for `s >= 1/4`;
+- the enclosed current for `s >= 1/4` converges at order >= 1.8 between every pair of resolutions, and `buco / s` at the innermost half-grid point approaches its exact limit at every step.
+
+With `--check` a failed check fails the run. The suites are `demo`, which the example-scripts job runs, `quick` up to `ns = 100` and `full` up to `ns = 1000`.
+
+`.github/workflows/exact_equilibria.yaml` runs the quick suite with `--check` on every pull request and push to main, and the full suite, one job per member, on release and on manual request; each writes its tables and checks to the job summary and uploads the plots and data.
+
+`tests/test_exact_equilibrium.py` holds `sheared` at `ns = 25` to tolerances and requires the error in the enclosed current to fall at least 3.5-fold from `ns = 13` to `ns = 25`.
+
+| member | eps, S, lambda, k_b | iota | beta |
+|---|---|---|---|
+| `sheared` | 0.6, 2.2, 2.97, 0.2 | 4.343 to 4.367 | 1.9% |
+| `sheared-near-3.5` | 1, 1.75, 2.65, 0.2 | 3.429 to 3.438 | 1.8% |
+| `sheared-A`, the repository's case A | 1.08, 3, 3.5, 0.7 | 5.689 to 6.218 | 19.7% |
+| `iota2`, `eps = 0.25`, `delta = 1/64` | | 2 | 3.2% |
+
+**Cause** - The paper's field, flux label and pressure are elementary functions of position, with nested flux surfaces and no continuous symmetry, so VMEC++'s surfaces, axis, field and currents can be compared with the exact ones wherever VMEC++ puts its points. The paper's poloidal angles turn opposite to VMEC's theta, so VMEC's iota is minus the paper's. At `ftol = 1e-16` the surfaces of `sheared` carry a helical displacement `cos(theta + 4 phi)`, resonant at iota = 4, whose amplitude the residual does not fix: at `ns = 200` it is 1.8e-5 of the boundary `psi` after the coarser grids, 9.9e-5 on a single grid and 2.6e-4 at `ftol = 1e-14`, VMEC++'s angular grid (`ntheta = 60`, `nzeta = 48`) leaves it as it is, and on a single grid at `ftol = 1e-18` it is 9.4e-7. The residual VMEC++ reaches rises with `ns`, from 8e-23 at `ns = 25` to 2e-20 at `ns = 100`.
+
+**Evidence** - The quick suite, `sheared` at `mpol = 12`, `ntor = 10`, every run converged to 1e-18:
+
+| ns | psi | axis, m | B | B, s >= 1/4 | current | current, s >= 1/4 | jcurv, s >= 1/4 | buco / s at the axis |
+|---|---|---|---|---|---|---|---|---|
+| 13 | 1.9e-4 | 8.0e-6 | 1.3e-4 | 5.7e-5 | 1.7e-5 | 1.7e-5 | 5.3e-6 | 3.1e-4 |
+| 25 | 5.2e-5 | 4.2e-6 | 4.9e-5 | 1.5e-5 | 4.2e-6 | 4.2e-6 | 1.2e-6 | 1.6e-4 |
+| 50 | 1.9e-5 | 1.6e-6 | 2.1e-5 | 2.6e-6 | 1.2e-6 | 9.8e-7 | 5.6e-7 | 9.1e-5 |
+| 100 | 1.3e-5 | 8.2e-7 | 1.8e-5 | 1.6e-6 | 4.3e-7 | 2.4e-7 | 9.5e-8 | 5.9e-5 |
+
+All five checks pass. The fitted orders are 1.31 for `psi`, 1.11 for the axis, 0.96 for `B` and 1.75 for the current. At `ns = 100`, `B` for `s >= 1/4` falls from 2.2e-3 at `mpol = 4`, `ntor = 2` through 5.6e-5, 3.4e-6, 2.9e-6, 1.6e-6 and 6.4e-7 to 4.0e-7 at `mpol = 16`, `ntor = 14`, while `psi` and the axis fall 963 and 506-fold to `mpol = 8`, `ntor = 6` and stay at their radial floor above it. The axis is 8.2e-7 m from the exact axis at `ns = 100`. `B` for `s >= 1/4` converges at order 1.77, and `jcurv` at -0.39 over the whole profile against the current's 1.75 and at 1.81 for `s >= 1/4` against 2.03. The current for `s >= 1/4` converges at orders 2.04, 2.03 and 2.02.
+
+- The whole-profile deviations are set at the axis. The relative error of `buco` at the four innermost half-grid points does not fall with `ns`: in the full suite at `ftol = 1e-16` it is 3.3e-5, 2.0e-5, 1.2e-5 and 7.6e-6 at `ns = 400` and 2.4e-5, 1.7e-5, 1.1e-5 and 7.8e-6 at `ns = 1000`, so the whole-profile current converges at order 1.07 there and `jcurv` does not converge at the innermost full-grid points. From `ns = 50` to 100, `psi` and `B` over the whole profile converge at orders 0.55 and 0.24.
+- The exact limit of `buco / s` at the axis agrees with a direct quadrature of the current to 4e-13, and the boundary VMEC++ receives deviates from the exact surface by 3.3e-9 of the boundary `psi` at `mpol = 12`, `ntor = 10`.
+- `sheared-near-3.5` converges to 1e-18 at `ns = 13` and 25 and stops at 1.3e-17 and 1.4e-15 at `ns = 50` and 100; its current for `s >= 1/4` converges at orders 2.07, 2.10 and 2.02. `sheared-A`, whose iota crosses 6, stops between 3e-9 and 7e-8, and `iota2` between 4e-14 and 3e-11.
+- The repository's cases B and C are not members: their boundaries deviate from the exact surfaces by 7e-2 and 4e-1 of the boundary `psi` at `mpol = 12`, `ntor = 10`, and by 4e-3 and 5e-2 at `mpol = 24`, `ntor = 22`.
+
+**Tests** - `pytest tests/test_exact_equilibrium.py` passes in 4 s, and the pinned `ruff` and `docformatter` pass on the files.
+
+**Scope** - One example, one test, one workflow. Nothing in the solver or the Python layer changes. The other jobs fail on main's Mercier renames from #563, which #914 completes.
+
+--- comment by jurasic-pf, 2026-09-29 08:36 UTC ---
+Landreman also has the public repository with the exact equilibria from the different families https://github.com/landreman/analytic_3d_equilibria
+
+Great that you picked this up, I think this is a very valuable verification suite, and I was also prototyping what to do with it.
+We should aim for more than just unit tests imo in this case, and really check correctness/try to surface any remaining bugs in this excercise. We can split it into a cheaper subset that runs e.g. up to ns=100 and a more expensive V&V suite running up to ns=1000
+
+Let's check and generate V&V plots in CI for (among others) the following:
+- Does the `ns` convergence hold to the expected order (O(h))
+- Does the `mpol`, `ntor` convergence hold to the expected order (spectral)
+- Is the axis geometry recovered to numerical precision?
+- Quantities of B should converge to high precision, derivative quantities not as much.
+- Enclosed current converges at O(h^2) and has the right limit behavior
+
+This can be built as a sequence of PRs, but overall I would aim for something in that direction.
+
+
+=== PR #915 [OPEN] Test the half-grid order, a forced current sheet and free-boundary balance ===
+
+--- description by CharlesCNorton, 2026-09-29 13:04 UTC ---
+Three regression tests, with the examples they run:
+
+- `test_half_grid_convergence.py`: the half-grid rule's error on the manufactured mappings of #784 falls fourfold per doubling of ns.
+- `test_forced_current_sheet.py`: on the circular tokamak with a (1,1) ripple, the (2,1) harmonic of the radial force at iota = 1/2 does not fall under radial refinement, while the (2,0) and (1,0) harmonics fall fourfold per doubling.
+- `test_free_boundary_jump.py`: on the CTH-like case, the jump of p + B^2/2 across the boundary falls under radial refinement from 25 to 97 surfaces.
+
+The tolerances are interval enclosures from https://github.com/CharlesCNorton/stellarocq. The commit includes #784 and #903, which the first and third tests need.
 
 
 === PR #497 [CLOSED, not merged, draft] Long double vmecpp to diagnose the amount of truncation errors ===
@@ -3883,6 +3623,23 @@ The new test fails on all three names without the validation change and passes w
 Superseded by #832, which implements the three profiles instead of rejecting them.
 
 
+=== PR #803 [CLOSED, not merged] Take indata2json at the commit that keeps a trailing zero spline value ===
+
+--- description by CharlesCNorton, 2026-09-06 16:21 UTC ---
+**Change** - the `indata2json` pin moves from `f59e3dd` to `df7e911`, the commit of jonathanschilling/indata2json#12, which sizes both arrays of a spline pair from the knot array.
+
+**Cause** - at `f59e3dd` the converter trimmed the trailing zeros of `am_aux_f`, `ai_aux_f` and `ac_aux_f` independently of their knot arrays. An INDATA file whose spline profile ends at exactly zero, the ordinary case for a pressure or current profile, converted to a JSON with one value fewer than knots, and `VmecINDATA::FromJson` rejected it.
+
+**Evidence** - the shipped `input.cth_like_fixed_bdy_spline_pressure` could not be loaded through `VmecInput.from_file`; at the new pin it loads with all 201 knots and values.
+
+**Tests** - `test_ensure_vmecpp_input_keeps_trailing_zero_spline_value` in `tests/test_init.py` loads the shipped spline INDATA and requires 201 knots and values equal to the shipped JSON; it fails at the previous pin.
+
+**Scope** - the INDATA conversion only; JSON inputs do not pass through `indata2json`.
+
+--- comment by jurasic-pf, 2026-09-29 09:29 UTC ---
+Addressed
+
+
 === PR #811 [CLOSED, not merged] Integrate the line-segment profile to the evaluation point, not the next knot ===
 
 --- description by CharlesCNorton, 2026-09-06 19:32 UTC ---
@@ -3927,6 +3684,23 @@ The "Test conda env" job (run 34170619332) failed with `AttributeError: module '
 [code omitted]
 
 - Included `src/vmecpp/_qs.py` and `tests/test_qs.py`, which were part of the same in-flight change but not yet present on this branch, so the re-export has something to target and the fix is exercised by the existing test.
+
+
+=== PR #834 [CLOSED, not merged] Reject an external field without stellarator symmetry when lasym is false ===
+
+--- description by CharlesCNorton, 2026-09-08 17:17 UTC ---
+**Change** - a free-boundary run with `lasym = false` now rejects an external field that is not stellarator symmetric. `Vmec::run` samples the field on the initial boundary and on its mirror image and returns `kInvalidArgument` when the rms antisymmetric part exceeds 1e-4 of the field, naming the measured value; `lasym = true` is unaffected.
+
+**Cause** - with `lasym = false` the vacuum solver samples the external field on the poloidal half range and the transforms extend it by stellarator symmetry, so a field with an antisymmetric part is replaced by a different field without any message, as in Fortran VMEC. The equilibrium then differs from the one the field produces: the cth coils raised by 0.2 mm, whose only physical effect is a rigid 0.2 mm shift of the plasma, move `rmax_surf` by 0.7 mm and the edge iota by 6e-4 relative to the `lasym = true` result; at 1 mm the boundary is off by 3.6 mm, at 5 mm by 26 mm and the edge iota by 2 percent. On an exact exterior Neumann problem (an interior current loop 6 cm off the axis) the symmetric path reports the enclosed current with a 14 percent error.
+
+**Evidence** - the antisymmetric part on the cth boundary is 3.2e-4 of the field for the 0.2 mm shift, 1.6e-3 for 1 mm and 7.9e-3 for 5 mm, and the boundary error of the `lasym = false` run is about twice that fraction of `rmax_surf`; the shipped cth field measures 2e-14 and the Solovev free-boundary field 6e-8. At the limit of 1e-4 the coils are off by 0.06 mm and the unnoticed boundary error would be 0.2 mm. Every free-boundary case in the test suites passes the check.
+
+**Tests** - `ExternalFieldWithoutStellaratorSymmetryNeedsLasym` in `vmec_in_memory_mgrid_test` (the raised coils rejected with `lasym = false`, accepted with `lasym = true`) and `test_external_field_without_stellarator_symmetry_needs_lasym` in `tests/test_free_boundary.py`.
+
+**Scope** - the check runs once per `run`, costs two interpolations of the boundary, and only fires for `lasym = false` free-boundary runs whose field fails the symmetry by more than the limit; a boundary outside the vacuum grid is still reported by the vacuum solver.
+
+--- comment by jurasic-pf, 2026-09-29 09:27 UTC ---
+Up to the user. If they want to run symmetric vmec in an asymetric field, I would not block that.
 
 
 === PR #850 [CLOSED, not merged] JAX port of the wout output post processing ===
@@ -4034,6 +3808,186 @@ Both tests pass locally. Full existing test suite unaffected (no other binding c
 
 --- comment by jurasic-pf, 2026-09-12 15:43 UTC ---
 Closing: caching state alongside a solved model is better handled on the Python side (a cache keyed by the boundary in the autodiff wrapper, coming in a separate PR) than by attaching dynamic attributes to the C++ object.
+
+
+=== PR #855 [CLOSED, not merged] autodiff: reuse the forward solve's model in the reverse callback ===
+
+--- description by jurasic-pf, 2026-09-12 16:01 UTC ---
+# autodiff: reuse the forward solve's model in the reverse callback
+
+## Scope
+
+`DifferentiableVmec._backward_callback` re-solved the equilibrium from scratch
+on every call, so a single `jax.value_and_grad` paid for two nonlinear solves.
+Any solver failure, or a non-converged GMRES adjoint solve (`info != 0`),
+raised inside the JAX callback, which aborts an optimizer's line search rather
+than letting it backtrack.
+
+This change only touches `_backward_callback`'s model acquisition and adds an
+opt-in failure mode; it does not change the adjoint algorithm itself (that is
+the direct-solve branch stacked on top).
+
+## Change
+
+- Added `_ModelCache`, a small LRU cache (`collections.OrderedDict`-backed)
+  from `boundary.tobytes()` to the converged `VmecModel`. `_solve_model_cached`
+  looks the model up before falling back to `_solve_model`.
+- `DifferentiableVmec` gained `cache_size: int = 4` and
+  `on_failure: Literal["raise", "nan"] = "raise"`, threaded through
+  `make_solver(vmec_input, *, cache_size=4, on_failure="raise")`. Both
+  `_forward_callback` and `_backward_callback` now go through the shared
+  per-solver cache, so the model produced by a forward call is available to
+  the backward call `jax.custom_vjp` invokes for the same primal value.
+- With `on_failure="nan"`, a forward solver exception or a backward adjoint
+  exception is caught, reported with `warnings.warn`, and replaced by an
+  all-NaN output/cotangent of the expected shape, instead of propagating out
+  of the `jax.pure_callback`. Defaults are unchanged
+  (`cache_size=4`, `on_failure="raise"`), so existing callers see no behavior
+  change unless they opt in.
+
+## Tests and measurements
+
+New file `tests/test_autodiff_cache.py`:
+- `test_backward_reuses_the_cached_forward_model`: after a forward call, the
+  backward call for the same boundary makes zero additional `_solve_model`
+  calls (monkeypatched counter).
+- `test_cache_miss_falls_back_to_a_fresh_solve`: a different boundary triggers
+  its own solve.
+- `test_cache_evicts_the_least_recently_used_entry`: with `cache_size=1`, a
+  second boundary evicts the first, and a subsequent backward call for the
+  evicted boundary re-solves.
+- `test_cache_size_must_be_positive`, `test_on_failure_must_be_a_known_literal`:
+  input validation.
+- `test_on_failure_nan_warns_and_returns_nan_on_solver_failure` /
+  `..._on_adjoint_failure`: a monkeypatched failure in the solve or the
+  adjoint VJP is turned into a `UserWarning` plus a NaN-filled array of the
+  correct shape.
+- `test_on_failure_raise_is_the_default_and_propagates`: the default still
+  raises.
+
+All of `tests/test_autodiff.py`, `tests/test_geometry.py`,
+`tests/test_hessian.py`, and the new file pass against an Enzyme-enabled
+build (19 passed, 1 skipped — the skip is `has_exact_force_jacobian`-gated
+and unrelated to this change).
+
+**Wall time**, CTH-like fixed-boundary case, `ns=25`, `ftol=1e-14`, `ncurr=0`
+with the converged `ncurr=1` iota profile prescribed as an 8th-order power
+series (`ai`), single-core (`OMP_NUM_THREADS=1`), 3 repetitions of
+`jax.value_and_grad` on `sum(r_cc**2)`:
+
+| | run 1 | run 2 | run 3 | median |
+|---|---|---|---|---|
+| before (backward re-solves) | 49.79 s | 49.05 s | 40.41 s | 49.05 s |
+| after (backward reuses cache) | 37.67 s | 52.28 s | 49.38 s | 49.38 s |
+
+At this resolution the equilibrium solve itself takes about 2 s, while the
+GMRES adjoint solve (unchanged by this branch) takes on the order of 40-50 s,
+so removing the redundant equilibrium solve yields a small (roughly 4%)
+reduction of the total gradient wall time here; the run-to-run variance in
+GMRES iteration count dominates the measured spread. The absolute win grows
+in configurations where re-solving costs more relative to the adjoint (e.g.
+more multigrid steps, tighter `ftol`, more line-search evaluations per
+gradient in an outer optimizer that calls the forward pass repeatedly before
+ever asking for a gradient). Reducing the adjoint's own cost is addressed by
+the direct-solve branch stacked on top of this one.
+
+## Open issues
+
+- The cache holds full `VmecModel` C++ objects; `cache_size` bounds the count
+  but not per-model memory, which scales with `ns * mpol * (ntor + 1)`. Left
+  at a default of 4; callers doing large sweeps
+  over many boundaries in one process may want a smaller `cache_size`.
+
+
+=== PR #856 [CLOSED, not merged] autodiff: expose the flat state layout as a public StateLayout ===
+
+--- description by jurasic-pf, 2026-09-12 16:01 UTC ---
+# autodiff: expose the flat state layout as a public StateLayout
+
+## Scope
+
+The flat solver state (`VmecModel.get_state()`/`get_forces()`) is only
+accessible through private helpers (`_span_slices`, `_interior_and_boundary`,
+`_structural_nullfree_interior`, `_boundary_from_state_vjp`,
+`_cpp_geometry_flat`, `_solve_model`), so downstream code has no supported way
+to ask which flat index belongs to which coefficient span, surface, or mode.
+
+## Change
+
+- Added a public, frozen `StateLayout` dataclass and `state_layout(model)`
+  constructor. `StateLayout` has:
+  - `spans: dict[str, slice]` — the same span order as before, named.
+  - `surface: dict[str, np.ndarray]` / `mode: dict[str, np.ndarray]` — per-span
+    arrays giving each flat entry's surface index and its `(m, n)`-flattened
+    mode index within the surface.
+  - `boundary` / `interior` — partition the whole state (fixed `r`/`z` at the
+    last surface vs. everything else).
+  - `structural_zero` / `gauge` / `solved` — partition `interior`:
+    - `structural_zero`: DOFs with both a zero Hessian row and column (no
+      force depends on them and they produce no force) — unconstrained
+      gauge/parity modes.
+    - `gauge`: the m=1 constraint-gauge entries zeroed by
+      `FourierForces::zeroZForceForM1` (`z_cs` under `lthreed`, `z_cc` under
+      `lasym`). Their force row is identically zero, but unlike
+      `structural_zero`, their Hessian *column* is not: the state entry still
+      feeds the m=1 constraint coupling (`M1Constraint`) that other rows
+      depend on.
+    - `solved`: what `_structural_nullfree_interior` returned before this
+      change, i.e. the DOFs the adjoint system is actually solved for, with
+      the gauge rows now split out by name/mode instead of left folded into
+      the general row/column probe. `gauge` rows already fail the probe's
+      "row nonzero" test (since the force row is exactly zero), so they were
+      already excluded from the old `nullfree` set; this change only gives
+      that subset a name and an explicit, structural (not probed)
+      derivation.
+- `_span_slices` and `_interior_and_boundary` are now thin wrappers, kept for
+  the existing private call sites (`_boundary_from_state_vjp`,
+  `_implicit_boundary_vjp`, and the tests that probe them directly).
+- The module docstring gained a "State layout" section documenting the state
+  <-> `Geometry` correspondence: span order and which spans exist for a given
+  `lthreed`/`lasym` combination, the `(ns, mpol, ntor + 1)` surface-major block
+  layout matching `vmecpp.Geometry`/`get_geometry()`, and the `sqrt(2)` scaling
+  of `m, n != 0` modes relative to the external combined basis.
+- `StateLayout` and `state_layout` are added to `__all__`.
+
+## Tests and measurements
+
+New file `tests/test_autodiff_state_layout.py`, parameterized over a 2D
+(solovev) and a 3D model (the same construction
+`tests/test_autodiff.py::_small_3d_input` uses, so the `r_ss`/`z_cs`/`lambda_cs`
+blocks and the `z_cs` gauge rows are exercised):
+
+- `test_index_sets_partition_the_state`: `boundary ⊔ interior` covers the full
+  state with no overlap, and `structural_zero ⊔ gauge ⊔ solved` covers
+  `interior` with no overlap, for both the 2D and 3D cases.
+- `test_solved_matches_the_previous_structural_nullfree_interior`: `solved`
+  equals `_structural_nullfree_interior(model, interior)` minus `gauge`, i.e.
+  the previously-returned interior set, now split into gauge and solved.
+- `test_gauge_is_empty_in_two_dimensions`: the 2D case has no
+  `lthreed`/`lasym` blocks, so there is nothing for `zeroZForceForM1` to zero.
+- `test_gauge_force_rows_are_zero`: in the 3D case, `gauge` is nonempty and
+  the raw force at those indices is exactly zero (to `1e-12`).
+- `test_spans_partition_the_flat_state`: the named spans tile the flat state
+  with no gaps or overlaps.
+- `test_surface_and_mode_indices_agree_with_the_span_shape`: `surface`/`mode`
+  arrays have the right shape and range for each span.
+
+All of `tests/test_autodiff.py`, `tests/test_autodiff_cache.py` (from the
+stacked branch below this one), `tests/test_autodiff_state_layout.py`,
+`tests/test_geometry.py`, and `tests/test_hessian.py` pass: 27 passed,
+1 skipped (Enzyme-gated), against an Enzyme-enabled build.
+
+## Open issues
+
+- `state_layout`'s `n_probe`/`tol`/`seed` defaults match
+  `_structural_nullfree_interior`'s; a caller who wants a different
+  probe budget for a larger `mpol`/`ntor` can already pass them through, but
+  there is no guidance yet on how to size them for a much larger case (this
+  is inherited from the pre-existing probing, not new to this change).
+- `gauge` is derived from `zeroZForceForM1`'s `(m=1, all n)` rule read off the
+  C++ source rather than from a Hessian probe, so it is exact but tied to
+  that specific constraint; if a future constraint changes which entries are
+  gauge-fixed, this derivation needs a matching update.
 
 
 === PR #857 [CLOSED, not merged] autodiff: block-tridiagonal assembly of H_SS^T for a direct adjoint solve ===
@@ -4283,4 +4237,34 @@ The `[11, 11]` result agrees with the single `[11]` step to 2e-9 in `rmnc` and 4
 
 --- comment by jurasic-pf, 2026-09-26 17:31 UTC ---
 I don't think it's worth special casing for equal ns multigrid. That's a very constructed edge case
+
+
+=== PR #907 [CLOSED, not merged] Reject a nonzero curtor on a current profile too small to be scaled ===
+
+--- description by CharlesCNorton, 2026-09-27 13:27 UTC ---
+**Change** - with `ncurr = 1`, a nonzero `curtor` on a current profile whose value at the boundary is too small to be scaled, such as the default empty `ac` or `ac = [0, 0, 0]` with `power_series`, is now rejected with `kInvalidArgument` naming the profile, `I(1)` and `curtor`. The check runs in `CheckCurrentProfileEnclosesEdgeCurrent` after the one from #831 and applies the scaling condition of `evalRadialProfiles`, which both now call as `EdgeCurrentScalesToCurtor`. A vanishing profile with `curtor = 0` still runs.
+
+**Cause** - `evalRadialProfiles` scales the enclosed current profile to `curtor` only when `|I(1)| > |DBL_EPSILON * curtor|`, as `profil1d` does in Fortran VMEC, and leaves `Itor = 0` otherwise. The check from #831 fires only when some `|I(s)| > 0`, so a profile that is zero everywhere passed it and the run converged at zero current whatever `curtor` asked for.
+
+**Evidence** - `li383_low_res` (`curtor = -174250` A, `power_series`) converges with its own `ac` to `ctor = -177181` A. On main, `ac = []` and `ac = [0, 0, 0]` converge to `ctor = 7.5e-10` A with nothing on stdout or stderr and no Python warning. With this change both stop before the first iteration with `the current profile 'power_series' has I(1) = 0.000e+00 at the boundary, too small to be scaled to curtor = -1.742e+05`, as does `ac = [1e-30]` with `I(1) = 1.000e-30`, while `ac = [1, -2]` meets the message from #831 as before and `ac = []` with `curtor = 0` converges as on main.
+
+**Tests** - `RejectsANonzeroCurtorOnAVanishingCurrentProfile` in `vmec_test` runs `cth_like_fixed_bdy` with `power_series` and the empty `ac`, a zero `ac` and `I(s) = 1e-30 s`, expects `kInvalidArgument` for each, and runs the empty profile with `curtor = 0`. It fails on main, where the first of these runs succeeds.
+
+**Scope** - the check applies the condition the solver scales by, so an input is rejected exactly when it would have run without current, which Fortran VMEC does silently. Every shipped input with `ncurr = 1` and a vanishing profile, such as `cma.json` and `near_axis_iota_nfp4.json`, sets `curtor = 0` and runs as before.
+
+--- comment by jurasic-pf, 2026-09-29 11:17 UTC ---
+I don't think this edge case is worth guarding against.
+
+
+=== PR #913 [CLOSED, not merged, draft] Align Mercier test with current derivative API ===
+
+--- description by Copilot, 2026-09-29 09:42 UTC ---
+The ASan workflow failed during compilation because the Mercier test referenced derivative fields that no longer exist. The API uses toroidal-flux derivatives for intermediate quantities and volume derivatives in the assembled output.
+
+- **Update Mercier assertions:** Use the current `_d_phi` and `_d_volume` fields, and update the related `dV/dPhi` comment.
+- **Example:**
+  [code omitted]
+
+--- comment by CharlesCNorton, 2026-09-29 09:55 UTC ---
+The asan job fails on `output_quantities_test.cc`, which #563 left on the old Mercier names. The same rename also breaks `vmecpp.Mercier`, which reads `d_volume_d_s`, `d_toroidal_current_d_s` and `d_pressure_d_s` from the binding, so every `vmecpp.run` raises `AttributeError`, as well as `tests/test_init.py` and `tests/test_lasym.py`, which name the old fields, and the reference outputs `solovev.out.h5` and `cth_like_fixed_bdy.out.h5`, whose datasets keep the old names, so that `vmec_hot_restart_test`, `ideal_mhd_model_hot_restart_test` and `fourier_geometry_test` fail at `OutputQuantities::Load` once the test compiles. #914 changes all six files.
 
