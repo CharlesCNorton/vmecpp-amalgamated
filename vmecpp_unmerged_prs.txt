@@ -1,7 +1,7 @@
 VMEC++ pull requests from github.com/proximafusion/vmecpp that are open, or were
 opened on or after 2026-04-25 and closed without merging, taken
-2026-09-29 17:11 UTC: 56 open, 70 closed. The amalgamation beside this file is
-built from github.com/proximafusion/vmecpp v0.7.5-43-g2b46babc; the changes of
+2026-09-30 01:50 UTC: 39 open, 73 closed. The amalgamation beside this file is
+built from github.com/proximafusion/vmecpp v0.7.5-56-gd358bbd4; the changes of
 merged pull requests are in it, and those pull requests are not listed here.
 
 Each entry gives the pull request's title and state, then its description and
@@ -116,16 +116,6 @@ case
 --- review by jurasic-pf, 2026-03-30 21:19 UTC: APPROVED ---
 
 
-=== PR #467 [OPEN] RegularizedIntegrals: fixup for axisymmetric cases ===
-
---- description by jons-pf, 2026-03-30 16:32 UTC ---
-(empty)
-
---- inline thread on vmecpp/free_boundary/regularized_integrals/regularized_integrals.cc:23 ---
-> jurasic-pf, 2026-03-30 21:23 UTC:
-isnt this nfp for stellarator cases? why do we allocate a bigger array than before?
-
-
 === PR #471 [OPEN] snapshot of apparently-fixed solovev_free_bdy ===
 
 --- description by jons-pf, 2026-04-01 09:39 UTC ---
@@ -165,45 +155,6 @@ I'm out of my depth, I'd leave this to @jons-pf if that's ok. if you need me to 
 
 --- comment by jurasic-pf, 2026-05-08 09:33 UTC ---
 Converting back to draft while I figure out the performance regression at very small sizes
-
-
-=== PR #512 [OPEN, draft] WIP: partitioning investigation artifacts ===
-
---- description by jurasic-pf, 2026-05-04 18:26 UTC ---
-Investigation-only branch carrying the diagnostic scripts and the
-running notes that informed the imbalance-aware radial partitioning
-work on partition-aware. Intentionally not merged to main.
-
-* OPTIMIZATION_REPORT.md -- running write-up of measurements (baseline,
-  per-thread function-body times, sweep tables, conclusions).
-* scripts/measure_boundary_overhead.py -- per-thread cumulative time
-  inside computeJacobian.body across NS values; fits the additive
-  boundary-overhead model.
-* scripts/simulate_partition.py -- predicts makespan under both the
-  multiplicative and additive partitioning models, useful for tuning
-  the kBoundarySurfacesOff* constants.
-* scripts/sweep_partition_offsets.py -- A/B wall-clock sweep across
-  (axis_off, lcfs_off) combinations, used to verify the partitioner
-  empirically.
-* examples/data/input.w7x -- bumped NS_ARRAY to 300 and tightened
-  FTOL_ARRAY to 1e-9 so the per-iteration savings actually show up
-  above the bench noise floor on this longer-running case.
-
-
-=== PR #526 [OPEN] add docling version of TNOV ===
-
---- description by jons-pf, 2026-05-20 10:18 UTC ---
-How was this done?
-
-Starting from https://github.com/proximafusion/the_numerics_of_vmecpp :
-
-[code omitted]
-
---- comment by jurasic-pf, 2026-05-20 11:40 UTC ---
-Interesting, let's try it, if its helpful for agents we can keep it. Are there any useful plugins for agents to interpret this data better?
-
---- review by jurasic-pf, 2026-05-20 11:41 UTC: APPROVED ---
-Let's please put it in LFS though
 
 
 === PR #537 [OPEN] output_quantities: implement lbsubs full-grid B_s via radial force balance ===
@@ -264,6 +215,31 @@ cth_like_fixed_bdy_nzeta_37 has odd `nzeta`, so the collocation row count cannot
 
 --- comment by jurasic-pf, 2026-09-06 21:00 UTC ---
 I think we still need to sanity check this with some plots on our side. Code-wise, the PR looks good.
+
+--- comment by CharlesCNorton, 2026-09-29 20:43 UTC ---
+@jurasic-pf, these are the plots of this branch (99402f19) against PARVMEC. The cases are `solovev`, `cth_like_fixed_bdy` and `cma` from `src/vmecpp/cpp/vmecpp/test_data` and `examples/data/w7x.json`, converged to ftol 1e-14 (Solov'ev 1e-16) in both codes and converted to INDATA with this branch's `vmecpp_json_to_indata`. Each case runs with `lbsubs = F` and with `lbsubs = T`, and in both codes it ends on the same force residuals either way. PARVMEC is built from ORNL-Fusion/Stellarator-Tools d513251 with PARVMEC from my fork at 4a0de83, whose `jxbforce.f` and `getbrho.f` (which holds `getbsubs`) are those of ORNL-Fusion/PARVMEC master. Everything plotted comes from `jxbout`: `bsubs` is the full-grid B_s, and `jxb_gradp` is the local radial force residual (J x B)_s - p', whose largest and smallest values on a surface are `amaxfor` and `aminfor`. The scripts are next to the figures on the [`pr537-assets`](https://github.com/CharlesCNorton/vmecpp/tree/pr537-assets) branch of my fork. Asymmetric inputs keep the interpolated B_s on this branch, so none is shown.
+
+[image: summary]
+
+With `lbsubs = T`, B_s solves B . grad(B_s) = brho - <brho> on each interior surface, which leaves the local radial force residual equal to its flux-surface average. The left panel is the spread (max - min) of (J x B)_s - p' over each surface, relative to its largest value with `lbsubs = F`: between 1.2 and 2 with `lbsubs = F`, and below 4e-10 on every surface of every case with `lbsubs = T`, in PARVMEC as in VMEC++. The right panel compares the codes surface by surface, as max |VMEC++ - PARVMEC| / max |PARVMEC|, for the correction dB_s = B_s(T) - B_s(F) (solid) and for B_s with `lbsubs = F` (dotted). The corrections agree to 6e-6 on Solov'ev and 8e-6 on CTH-like. On CMA they differ by up to 1.6e-2, which is how far apart the two codes' CMA equilibria already are: iota differs by 4.7e-4, the Z coefficients by 1.1e-3 and B_s with `lbsubs = F` by 9e-3. On W7-X they agree to 7e-5 on the median surface and to 1.3e-3 next to the axis, except on the two surfaces below.
+
+[image: W7-X force residual]
+
+[image: W7-X correction]
+
+The two W7-X surfaces are s = 0.48 and s = 0.81, where iota is 0.9007 and 0.9327. On the first the correction jumps to 6e-3 T in both codes, which agree there to 4 percent of it. On the second it jumps to 8e-2 T in VMEC++ and 1.9e-1 T in PARVMEC, with the same shape, mostly n = 2 with m = 8 to 14, and opposite sign. The residual on both surfaces is still flat to below 4e-10 in both codes. Converging each code to ftol 1e-13 instead of 1e-14 changes its correction by 1e-2 T at s = 0.48, and at s = 0.81 by 6e-2 T in VMEC++ and 2.2e-1 T in PARVMEC, while on every other surface it changes by at most 1.9e-3 of the largest correction and by 7e-5 on the median surface, the level at which the codes agree there. On those two surfaces the collocation system is close to singular, and the component along its near-null direction is set by the last digits of the equilibrium in both codes.
+
+[image: W7-X sensitivity]
+
+In every case the correction is largest on the surfaces next to the axis. On CTH-like it also peaks at s = 0.46, where iota passes 5/4 and the m = 4, n = 1 harmonic is resonant in B . grad. The correction there is about eight times that on the neighbouring surfaces, and the codes agree on it to 8e-6.
+
+[image: CTH-like force residual]
+
+[image: CTH-like correction]
+
+Solov'ev has no toroidal angle, so its figure shows B_s, the correction and the residual against theta on three surfaces, with PARVMEC as circles. CMA's maps are on the same branch.
+
+[image: Solov'ev]
 
 
 === PR #548 [OPEN, draft] Sparse coefficients fixed boundary ===
@@ -993,6 +969,9 @@ Since #584 landed, `MakeGeometry` accumulates the poloidal flux with `sign_of_ja
 
 Taking `d(chi)/d(phi)` from the file picks the same side: it matches `+iotas` to 3e-15 for the geometry profile and returns `-iotas` for `wout.chi`, which also equals minus the integral of the `chipf` stored beside it.
 
+--- comment by jurasic-pf, 2026-09-29 22:04 UTC ---
+This is one of the cases where i really dont know what to do @jons-pf ... Technically its true, chi has the wrong sign, but now all the stellarator tooling probably has the sign flip included already
+
 
 === PR #784 [OPEN] Measure the discretization by the method of manufactured solutions ===
 
@@ -1036,141 +1015,8 @@ The edge condition is second order, like the volume. There is no free-boundary c
 --- comment by CharlesCNorton, 2026-09-02 19:47 UTC ---
 fixing ci and other things
 
-
-=== PR #795 [OPEN] Carry the Jacobian sign in the Mercier volume derivative ===
-
---- description by CharlesCNorton, 2026-09-04 19:55 UTC ---
-**Change** - `ComputeMercierStability` multiplies the volume derivative of the first Mercier table by `sign_of_jacobian`, as it already does for WELL at the same site.
-
-**Cause** - the volume derivative was the plain half-grid average of `vp_real`. `mercier.f90:191` forms it as
-
-[code omitted]
-
-and then writes `shear(i)/sqs` as SHEAR, `sqs` itself as VP, `ip(i)/sqs` as ITOR' and `presp(i)/sqs` as PRES'. The Jacobian sign is therefore carried by all four columns, and with the usual negative Jacobian, which is every bundled case, they came out negated.
-
-**Evidence** - ratio to the `mercier.<case>` file educational_VMEC writes, before the change, to the five significant figures the file carries, on every case:
-
-| column | ratio before |
-| --- | --- |
-| SHEAR | -0.999987 |
-| VP | -1.000005 |
-| ITOR' | -0.999999 |
-| PRES' | -0.999996 |
-| WELL | 0.999978 |
-| IOTA | 0.999974 |
-
-S, PHI, PRES and ITOR agree as well. Comparing every column of both Mercier tables against that file across the bundled cases, nine go from four differing columns to all fifteen agreeing: `solovev`, `solovev_no_axis`, `solovev_analytical`, `cth_like_fixed_bdy`, `cth_like_fixed_bdy_iota`, `cth_like_fixed_bdy_nzeta_37`, `cth_like_fixed_bdy_spline_pressure`, `cth_like_free_bdy` and `li383_low_res`. What still differs elsewhere does not come from this quantity: `cma` carries no current, so its ITOR and ITOR' are round-off around 1e-10; the asymmetric cases differ by the `tmult` normalisation; and `up_down_asymmetric_tokamak` sits in a different poloidal gauge.
-
-**Tests** - `CheckMercierStability` reproduced the same unsigned average and asserted the first table against it, so the test and the implementation agreed with each other and both differed from the reference. The test now applies `sign_of_jacobian` where it already reads it for the WELL comparison.
-
-**Scope** - the second table is unaffected, since `Dshear`, `Dcurr`, `Dwell` and `Dgeod` are built from the intermediates and not from this quantity. Nothing outside the output stage reads these fields.
-
---- comment by CharlesCNorton, 2026-09-06 19:57 UTC ---
-Checked independently against the `mercier.<case>` text file educational_VMEC writes, rather than the dumps: on main the SHEAR, VP, ITOR' and PRES' columns come out with the opposite sign for `cth_like_fixed_bdy` and `solovev`, and on this branch all ten columns agree to the five digits the file prints.
-
---- review by jurasic-pf, 2026-09-25 21:49 UTC: APPROVED ---
-
-
-=== PR #799 [OPEN] Recover cold initial-Jacobian failures through the coarse bootstrap ===
-
---- description by philippbogdan, 2026-09-06 10:08 UTC ---
-A cold run can reject its first radial grid with a bad Jacobian even though a three-surface bootstrap reaches the requested equilibrium. Both the inner solver and grid driver returned before the existing fallback could execute. Allow that initial failure to reach the driver, restore the input axis and radial state, and retry once at three surfaces before the original grid sequence. Correct the logger's stage index for the inserted stage. The public single-grid solver keeps its existing interface and error handling.
-
-On a frozen set of 53 historical QUASR initial-Jacobian failures, the baseline converges on 0 cases and this change on the same 15 cases in each of three repetitions: 5 of 12 discovery cases and 10 of 41 held-out cases. Both use identical boundary coefficients, profiles, field tables, final resolution and `1e-9` tolerance. This is an initialization-robustness result on a selected stress set, not a population failure-rate or physical-accuracy claim.
-
-The PR includes the frozen source hashes, portable paired benchmark, measured ledgers, and regression tests. The numerical tests compare the complete recovered geometry and force history with an explicit cold-three solve. A regenerated educational_VMEC reference checks geometry, lambda, iota, pressure and flux. The corresponding Fortran fix is [educational_VMEC #29](https://github.com/jonathanschilling/educational_VMEC/pull/29).
-
-Validation details and physical-diagnostic limits are recorded in `benchmarks/initial_jacobian_recovery/README.md`. Native VMEC tests pass on macOS arm64; the paired Python regression run found the same six failures on baseline and the recovery implementation, with 201 passes, two skips and 36 deselections. That comparison preceded the final interface-preserving wrapper refactor; native tests, Python reference checks and independent API probes were repeated on the final build. Independent API checks cover fixed/free boundaries, finite pressure/current, one/four threads, all output modes, hot starts, later-stage failures and insufficient budgets.
-
---- comment by philippbogdan, 2026-09-06 16:13 UTC ---
-The conda job has no git-lfs, so it read the reference wout as a pointer file; the tsan run of vmec_test exceeded 900 s.
-Follow-up commit deselects the new Python test there, moves the LFS rule into src/vmecpp/cpp/.gitattributes, and trims the C++ test sweep.
-
-
-=== PR #814 [OPEN, draft] Propose shipping Enzyme-enabled kernels in pip wheels (follow-up to #710) ===
-
---- description by Copilot, 2026-09-06 21:23 UTC ---
-#710 wires an Enzyme-derived exact JVP/VJP of the force kernel into `vmecpp_core` behind `-DVMECPP_ENABLE_ENZYME=ON`, but that flag is never set in the `cibuildwheel`-built pip wheels — it's only exercised by a dedicated CI job with its own from-scratch Clang/LLVM + Enzyme toolchain. This adds a design proposal for closing that gap.
-
-## Changes
-
-- **`docs/enzyme_wheel_packaging.md`**: proposal doc covering
-  - Reusing the existing CMake "prebuilt Enzyme object" mode (`VMECPP_ENZYME_JVP_OBJECT`/`VMECPP_ENZYME_VJP_OBJECT`) instead of installing Clang/LLVM/Enzyme inside `manylinux`/macOS `cibuildwheel` containers
-  - Compiling the two Enzyme translation units in a small, separate, cacheable CI job per wheel target, then feeding the resulting `.o` files into the normal wheel build via `CMAKE_ARGS`
-  - Why this keeps every other translation unit compiled exactly as today, so non-adjoint users see no change to the code they exercise, and why Enzyme introduces no new runtime dependency (it only runs at build time)
-  - Concrete checks for no performance regression: symbol/disassembly diffing of unaffected translation units, and extending the existing exact-HVP benchmark with a forward-solve timing comparison run against an actual built wheel
-  - Open questions: which wheel targets to prioritize, prebuilt-object staleness/versioning, Windows being out of scope for now
-- **`docs/index.md`**: links the new doc from the toctree
-
-## Scope
-
-This is a design proposal only, not an implementation. The actual toolchain and CI wiring is substantial, cross-platform work intended to be done and validated incrementally in follow-up PRs, building on this proposal.
-
---- comment by jurasic-pf, 2026-09-07 08:05 UTC ---
-@copilot Follow the implementation proposal added in this PR
-
-
-=== PR #820 [OPEN] Add an opt-in undamped lambda preconditioner ===
-
---- description by CharlesCNorton, 2026-09-07 12:14 UTC ---
-**Change** - `VmecInput.undamped_lambda_preconditioner`, off by default (JSON and HDF5 round trip through `VmecINDATA`). Set, the lambda preconditioner scales its assembled diagonal by `1 / lamscale^2` alone, through `kLambdaPreconditionerUndampedFactor`; unset, the scale stays `kLambdaPreconditionerDampingFactor / (4 lamscale^2)`.
-
-**Cause** - the `1 / lamscale^2` converts the internally rescaled lambda coefficients. The remaining factor of 0.5 comes from VMEC, where `lamcal.f90` sets `damping_fac = 2.0` beside a commented-out `pfactor0/4` marked "sometimes helps convergence"; neither the Fortran nor the VMEC++ comment gives a derivation for it.
-
-**Evidence** - iterations summed over the multigrid schedule, single-threaded, each case at its own ftol. The twelve QUASR configurations of `tests/test_free_boundary_quasr.py`, run in fixed-boundary mode at mpol = ntor = 6 and ns_array = [8, 16, 31]:
-
-| case | off | on |
-| --- | --- | --- |
-| 954 | 141 | 133 |
-| 9914 | 328 | 261 |
-| 19493 | 819 | 689 |
-| 19609 | 587 | 447 |
-| 19940 | 492 | 416 |
-| 29346 | 431 | 432 |
-| 50136 | 1325 | 1331 |
-| 65579 | 905 | 772 |
-| 112718 | 636 | 509 |
-| 165868 | 441 | 377 |
-| 167381 | 464 | 386 |
-| 336902 | 461 | 367 |
-| total | 7030 | 6120 |
-
-and the fixed-boundary cases of the test suite:
-
-| case | off | on |
-| --- | --- | --- |
-| solovev | 204 | 217 |
-| solovev_analytical | 400 | 397 |
-| circular_tokamak | 749 | 589 |
-| cma | 207 | 148 |
-| cth_like_fixed_bdy | 121 | 113 |
-| cth_like_fixed_bdy_iota | 118 | 111 |
-| li383_low_res | 124 | 133 |
-| up_down_asym | 594 | 635 |
-| cth_like_fixed_bdy_asym | 137 | 132 |
-| total | 2654 | 2475 |
-
-That is 13 percent fewer iterations over the QUASR set and 7 percent over the test suite, at no cost per iteration, since the change is the value of a scalar computed once per preconditioner update. The gain is not uniform. Three of the nine test-suite cases take more iterations, and on the W7-X example the count is not a smooth function of the factor: scanning 2.0 through 6.0 gives 2954, 2699, 3604, 3616, 3520, 2580, 2609 and 3017, a twenty percent swing in either direction with no trend.
-
-The converged state moves with the descent path. At a case's own ftol the two settings stop about 1e-3 apart in `iotaf`; held to 1e-12 they are 4.1e-6 apart on `cth_like_fixed_bdy` and 5.1e-6 on `cth_like_fixed_bdy_asym`, and the enclosed volume is identical at every tolerance. What remains at 1e-12 is the spectral-condensation angle gauge, which moves the poloidal spectrum without moving the flux surfaces: `zmns` differs by 2.9e-4 where `wb` agrees to 2.3e-8. Changing only the thread count leaves all of these below 3e-14.
-
-**Tests** - in `vmec_test`, on `solovev`, `cth_like_fixed_bdy` and `cth_like_fixed_bdy_asym`: `UndampedLambdaPreconditionerLeavesTheFirstForceResidual` requires `fsqt(0)` to be bit-identical between the two settings, since the scale multiplies an already assembled force, and both runs to reach the tolerance; `UndampedLambdaPreconditionerConvergesToTheSameEquilibrium` compares `rmnc`, `zmns`, `iotaf` and `wb` at ftol 1e-12 against five times the measured deviation.
-
-**Scope** - unset, the assembled preconditioner is bit-identical to the current one, which every case above reproduces exactly.
-
---- comment by jurasic-pf, 2026-09-07 12:40 UTC ---
-Oh, that's very cool!
-
---- comment by jurasic-pf, 2026-09-07 12:41 UTC ---
-I'll try to review properly in the upcoming week
-
---- inline thread on src/vmecpp/__init__.py:445 ---
-> jurasic-pf, 2026-09-29 09:07 UTC:
-How about exposing the floating point value of `kLambdaPreconditionerDampingFactor` directly instead of a boolean flag? Let's expose it rescaled such that 1.0 == no damping, <1.0 daming, >1.0 accelerated 
-and briefly explain the effect in the docstring
-
---- review by jurasic-pf, 2026-09-29 09:07 UTC: CHANGES_REQUESTED ---
-Let's expose float instead of bool
+--- comment by jurasic-pf, 2026-09-29 23:01 UTC ---
+@copilot resolve the merge conflicts in this pull request
 
 
 === PR #823 [OPEN, draft] feat(solver): Residual-Aware Dynamic Preconditioning (RAD-P) for Issue #818 ===
@@ -1208,25 +1054,6 @@ Notable: `quasr_65579` -915 iterations (-27.2%), `up_down_asym` -105 iterations 
 `adaptive_preconditioner_update` defaults to `false`. Execution is bit-identical to current code when `false`. No configuration in the 21-case benchmark regresses in iteration count.
 
 
-=== PR #832 [OPEN] Implement the sum_cossq current profiles ===
-
---- description by CharlesCNorton, 2026-09-08 14:38 UTC ---
-**Change** - `pcurr_type = sum_cossq_s`, `sum_cossq_sqrts` and `sum_cossq_s_free` now evaluate the enclosed current of their cos^2 humps in closed form, as `pcurr` in Fortran VMEC does. `IsConsistent` requires `ac[0]` of the two equidistant forms to be an integer hump count from 2 to 20, and a positive half-width for every hump of the free form that carries an amplitude.
-
-**Cause** - the three names sat in the parameterization table as allowed current profiles, but `evalProfileFunction` fell through to its default branch, which returns 0.0 after one line on stderr. With `ncurr = 1` the run continued with zero current everywhere and reported `ctor = 0`; `VmecInput` types `pcurr_type` as a plain string and `IsConsistent` only checks that the name is in the table, so nothing stopped it.
-
-**Evidence** - `cth_like_fixed_bdy` with each of the three profiles, VMEC++ against PARVMEC 10.0 reading the same INDATA file at `ftol = 1e-11`: identical iteration counts (565, 513 and 620) and every wout field within 1e-6, `rmnc` within 1.2e-8, `iotaf` within 3e-8 and `jcurv` within 1e-13. On main the three inputs converge to one and the same currentless equilibrium in 744 iterations, `ctor` = 1e-11 A and an edge iota of 0.29 against the 43 kA and 0.83 to 0.89 they prescribe.
-
-**Tests** - `SumCossqSIntegratesItsHumps`, `SumCossqSqrtsIntegratesItsHumpsInRho` and `SumCossqSFreeIntegratesItsHumps` in `radial_profiles_test` compare the closed forms with a quadrature of the hump densities and the end humps cut by s = 0 and s = 1; `CheckSumCossqProfilesNeedAValidHumpLayout` in `vmec_indata_test` covers the rejections.
-
-**Scope** - the other parameterizations are untouched, and no reference file changes since educational_VMEC does not implement these profiles. At s = 0 exactly the enclosed current is 0, where the Fortran branch returns half the first hump; the solver evaluates the profile on the half grid and at s = 1 only.
-
---- review by jurasic-pf, 2026-09-25 23:12 UTC: APPROVED ---
-
---- comment by jurasic-pf, 2026-09-29 08:49 UTC ---
-@copilot resolve the merge conflicts in this pull request
-
-
 === PR #839 [OPEN] Hand every force iteration to a callback and watch a solve converge ===
 
 --- description by CharlesCNorton, 2026-09-09 00:05 UTC ---
@@ -1251,7 +1078,7 @@ Notable: `quasr_65579` -915 iterations (-27.2%), `up_down_asym` -105 iterations 
 --- comment by CharlesCNorton, 2026-09-22 18:03 UTC ---
 enhancing
 
---- inline thread on src/vmecpp/__init__.py:2470-2482 ---
+--- inline thread on src/vmecpp/__init__.py:2470-2482 (outdated) ---
 > jurasic-pf, 2026-09-29 08:53 UTC:
 Can we make this a Python object (dataclass, or BaseModelWithNumpy)?
 
@@ -1260,17 +1087,19 @@ For Python users, it's hard to understand how to interact with an opaque object 
 --- review by jurasic-pf, 2026-09-29 08:57 UTC: APPROVED ---
 I really like this change. Minor comments
 
---- inline thread on vmecpp/vmec/vmec/vmec.cc:1528 ---
+--- inline thread on vmecpp/vmec/vmec/vmec.cc:1528 (outdated) ---
 > jurasic-pf, 2026-09-29 08:59 UTC:
 EquilibriumState
 
---- inline thread on vmecpp/vmec/vmec/vmec.h:69 ---
+--- inline thread on vmecpp/vmec/vmec/vmec.h:69 (outdated) ---
 > jurasic-pf, 2026-09-29 08:59 UTC:
 SolverState
 
---- inline thread on src/vmecpp/__init__.py:2470 ---
+--- inline thread on src/vmecpp/__init__.py:2470 (outdated) ---
 > jurasic-pf, 2026-09-29 08:59 UTC:
 SolverState
+
+--- review by jurasic-pf, 2026-09-29 21:18 UTC: APPROVED ---
 
 
 === PR #843 [OPEN] Add a geometry tolerance that holds a run until the flux surfaces stop moving ===
@@ -1304,88 +1133,11 @@ Ten microns of surface motion is a stricter statement about the equilibrium than
 
 **Scope** - unset, the convergence test is the one that was there and every existing test reproduces its iteration count. The measure is computed at the printout interval only, from a copy of the R and Z coefficients, so it costs one comparison per `nstep` iterations. The criterion can only extend a run, never shorten one. The HDF5 read is guarded on the dataset being present, so inputs written before this still load.
 
-
-=== PR #845 [OPEN] Abandon a multigrid sequence whose step ends far from its tolerance ===
-
---- description by CharlesCNorton, 2026-09-09 17:00 UTC ---
-**Change** - `VmecInput` gains `lgiveup` and `fgiveup`, off by default with `fgiveup` at 30, the values LIBSTELL sets. With `lgiveup` set, a multigrid step that exhausts its iteration budget with `fsqr`, `fsqz` or `fsql` still above `fgiveup` times its `ftol` ends the sequence instead of interpolating that state onto the next grid, and the run reports the step it stopped at. `README.md` drops the entry listing the logic as missing.
-
-**Cause** - `Vmec::run` carried `TODO(jons): insert lgiveup/fgiveup logic here` at the point `runvmec.f:382` makes the same test. Without it a sequence whose coarse grid cannot reach its tolerance spends the rest of its budget on the finer grids, where every iteration costs more and the state each one starts from is the one that already failed.
-
-**Evidence** - the twelve QUASR configurations of `tests/test_free_boundary_quasr.py`, run fixed-boundary at mpol = ntor = 6 on `ns_array` [8, 16, 31], single-threaded, over three iteration budgets:
-
-| ftol | niter per step | stopped early | wall time, unset | set |
-| --- | --- | --- | --- | --- |
-| 1e-12 | 1500 | 1 of 12 | 36.3 s | 32.9 s |
-| 1e-11 | 400 | 10 of 12 | 10.6 s | 2.9 s |
-| 1e-11 | 250 | 11 of 12 | 7.2 s | 1.4 s |
-
-A configuration that stops at the first step costs 13 percent of what it costs otherwise, the two finer grids carrying the rest. The configurations that run the whole sequence take the same iterations either way: at the first budget the eleven that do not stop early converge in 1131, 1041, 1499, 1500, 1143, 1121, 1497, 1498, 1387, 1236 and 1152 iterations with the flag set and unset alike.
-
-**Tests** - `tests/test_giveup.py`: the defaults; a three-step schedule too short to converge stopping at `ns = 5` with the flag and at `ns = 25` without it; an `fgiveup` above the residual carrying the same schedule to its last step; a converging run reproducing its iteration count and its `rmnc` and `zmns` exactly; the rejection of a non-positive `fgiveup`; and a JSON round trip. `pytest tests/` is 236 passed, 4 skipped and `bazel test --config=opt //vmecpp/...` is 24 of 24. Pre-commit clean.
-
-**Scope** - unset, the multigrid loop is the one that was there and every existing test reproduces its iteration count. The check reads the residuals already in `FlowControl` and runs once per multigrid step. The HDF5 read is guarded on the dataset being present, so inputs written before this still load.
+--- comment by jurasic-pf, 2026-09-29 22:18 UTC ---
+Bit diagnosis of the issue, I think the fact that the axis keeps moving, even the force balance is so small indicates that we are preconditioning a way that dampens away physically meaningful terms. If its possible to imrpove things on the force balance side to address the same issue i would prefer that, otherwhise we can talk about this.
 
 
-=== PR #849 [OPEN] Pin the m=1 gauge in VmecModel so the equilibrium and its Jacobian are functions of the boundary ===
-
---- description by jurasic-pf, 2026-09-12 15:25 UTC ---
-# Pin the m=1 gauge in `VmecModel` so the equilibrium and its Jacobian are functions of the boundary
-
-## Scope
-
-`FourierCoeffs::m1Constraint` (`fourier_coefficients.cc`) stores, for every `m = 1, n >= 1` mode, the pair `(rss + zcs)/2` and `(rss - zcs)/2`; the second one, in the `zcs` slot, is a poloidal-angle origin per toroidal harmonic (`rss = zcs` is the quasi-polar constraint). `FourierForces::zeroZForceForM1` zeroes its force, but `IdealMhdModel::update` only does so when `always_fix_m1_gauge || fsqz < 1e-6 || iter2 < 2` (`ideal_mhd_model.cc`, around line 941). The native `solve()` therefore lets the gauge drift under its force during the first iterations and freezes it wherever it is once `fsqz < 1e-6`: the converged state is a history-dependent function of the boundary.
-
-Measured on `examples/data/cth_like_fixed_bdy.json` with `ncurr = 0` and the wout's iota profile prescribed (`ai = [1.239, 0.328, -0.768]`), `ns = 25`, `ftol = 1e-16`:
-
-- the gauge moves by 8.5e-5 during the native solve, against a gauge size of 7.4e-5;
-- a direct `ns = 25` solve and a `13 -> 25` multigrid solve of the same boundary differ by 5e-6 in `r_cc`, 4e-5 in `z_cs` and 1.2e-3 in `lambda_cs`;
-- `ExactHessianVectorProduct(Transpose)` in `pybind_vmec.cc` hard-wired `fix_m1_gauge = true` although the C++ kernels take the flag, so the Jacobian behind `vmecpp.autodiff` was the fixed-gauge one and did not describe the native solve.
-
-This PR makes the fixed-gauge solve available on `VmecModel`, gives `evaluate` and the exact Hessian-vector products one gauge semantics, and lets `vmecpp.autodiff` solve and differentiate the pinned-gauge system. The native `run()` and the default `VmecModel.solve()` are unchanged.
-
-## Tests and measurements
-
-New `tests/test_m1_gauge.py` (cth_like, `ncurr = 0`, `ns = 25`, `ftol = 1e-16`, Enzyme-dependent tests skip without the exact Jacobian):
-
-- `test_pinned_gauge_stays_at_the_boundary_interpolation`: the converged gauge entries equal the initial guess to 1e-12 (measured: 0.0) and equal `sqrt(s)` times the boundary gauge to 1e-15; the native solve moves them by 8.5e-5.
-- `test_pinned_gauge_solve_is_independent_of_the_multigrid_history`: direct `ns 25` vs `13 -> 25`, pinned: gauge entries identical (0.0), `r_cc, r_ss, z_sc, z_cs` agree to 2.2e-8, 1.4e-8, 1.6e-8, 1.4e-8, `lambda_sc, lambda_cs` to 3.4e-7, 1.4e-6 (the convergence floor at `ftol = 1e-16`; `lambda_cs` converges slowest). Native: 5.4e-6, 5.6e-6, 5.4e-6, 4.0e-5, 1.3e-5, 1.2e-3.
-- `test_exact_hvp_differentiates_the_force_with_the_same_gauge_flag[True|False]`: at the initial guess of the 3D solovev case (`fsqz` large, so the flags select different forces), the exact HVP matches central differences of `get_forces` evaluated with the same flag to 1e-6 relative; the gauge rows are exactly zero with the flag and O(1) without.
-- `test_implicit_vjp_matches_the_pinned_gauge_re_solve`: gradient of `sum(r_cc[12, 1, :]**2) + sum(lambda_sc**2)` w.r.t. `rbc(1, +1)`, `zbs(1, -1)`, `rbc(1, 0)` against Richardson-extrapolated central differences (`h = 1e-4`, `h/2`) of the pinned-gauge re-solve:
-
-  | mode | adjoint | Richardson FD (pinned) | rel. error | FD spread h vs h/2 (pinned) | FD spread (native) | native FD vs adjoint |
-  |---|---|---|---|---|---|---|
-  | `rbc(1,+1)` | -31.780242 | -31.780490 | 7.8e-6 | 5.1e-6 | 2.5e-5 | 3.2e-4 |
-  | `zbs(1,-1)` | -8.891567 | -8.891547 | 2.2e-6 | 8.1e-6 | 1.6e-5 | 1.2e-3 |
-  | `rbc(1,0)` | 10.249372 | 10.249315 | 5.6e-6 | 7.4e-7 | 3.0e-5 | 4.7e-4 |
-
-  The test asserts agreement to 1e-4 and FD spread below 1e-4. The native-gauge finite differences are not reproducible below 2e-5 to 3e-5 between step sizes, and their extrapolated values sit 3e-4 to 1.2e-3 from the adjoint: with the free gauge there is no derivative at that level to compare against.
-
-Cost and accuracy of the pinned solve, same case:
-
-- force evaluations to convergence: 1405 native, 1405 pinned; `mhd_energy` 1.2810136e-3 both (reference at mpol 8, ntor 6: 1.2810131e-3);
-- truncation error against a native `mpol 8, ntor 6` solve of the same boundary, max over the low modes: `r_cc` 4.04e-4 pinned vs 4.05e-4 native, `r_ss` 3.93e-4 vs 3.94e-4, `z_sc` 3.47e-4 vs 3.47e-4, `z_cs` 3.54e-4 vs 3.54e-4, `lambda_sc` 4.47e-3 vs 4.48e-3, `lambda_cs` 4.33e-3 vs 4.33e-3.
-
-Existing tests: `tests/test_autodiff.py`, `test_geometry.py` (8 passed, 1 skipped: the no-Enzyme fallback test), `test_hessian.py`, `test_iteration.py`, `test_internal_gradient.py`, `test_preconditioner.py` (31 passed) with the Enzyme-enabled build, `OMP_NUM_THREADS=1`. `pre-commit` (clang-format, ruff, docformatter, pyright) passes on the changed files.
-
-Runtime: `test_implicit_vjp_matches_the_pinned_gauge_re_solve` takes about 60 s, of which the adjoint GMRES solve (`rtol 1e-8`, restart 200) at ns 25, mpol 5, ntor 4 is the bulk; the 13 re-solves take under 2 s each.
-
-
-=== PR #864 [OPEN] Extrapolate the full-grid ends from the interior alone ===
-
---- description by CharlesCNorton, 2026-09-20 16:38 UTC ---
-**Change** - the axis and boundary entries of every extrapolated full-grid output now come from interior surfaces only, through one helper `ExtrapolateFullGridEnds` used by `ExtrapolateBSubS`, `ComputeJxBOutputFileContents` and `ComputeIntermediateThreed1FirstTableQuantities`. At `ns = 3`, where a two-point stencil has one interior surface to read, both ends take that value.
-
-**Cause** - each site wrote both ends in one pass, the axis as `2 f[1] - f[2]` and the boundary as `2 f[ns-2] - f[ns-3]`. At `NS_MIN` those stencils overlap: index 0 and index `ns - 3` are the same surface, so the axis was formed from an `f[2]` that is the boundary entry, still zero, and the boundary was then formed from the `f[0]` the same pass had just written, cancelling to exactly zero.
-
-**Evidence** - `solovev` at `ns_array = [3]` and `ftol = 1e-12` converges, and the per-surface maxima of `bsubs_full` are `3.732109e-02`, `1.866055e-02`, `0.000000e+00`: the axis exactly twice the single interior surface, the edge exactly zero. `jdotb` is `[-35470.86, -17735.43, 0]`, `bdotb` `[0.0804, 0.0402, 0]`, `bdotgradv` `[0.0990, 0.0495, 0]`, `equif` `[-0.0012, -0.0006, 0]`, and `bsubsmns_full` `[0.0356, 0.0178, 0]`. The same case at `ns = 4` gives `1.809e-02` to `1.904e-02` and at `ns = 5` `1.798e-02` to `1.891e-02`, monotone with a non-zero edge.
-
-**Tests** - `EndsAreIndependentAtTheSmallestRadialResolution` in `output_quantities_test`, pinning `ns = 3` to the interior value at both ends and `ns = 5` to the two-point extrapolations.
-
-**Scope** - for `ns >= 4` the arithmetic and its order are unchanged, so no reference value moves; `ns = 3` is reachable as a first multigrid step and as `NS_MIN`.
-
-
-=== PR #877 [OPEN] Expose the half-grid fields and the enclosed current to the Python-driven solve ===
+=== PR #877 [OPEN, draft] Expose the half-grid fields and the enclosed current to the Python-driven solve ===
 
 --- description by CharlesCNorton, 2026-09-22 17:50 UTC ---
 ## Change
@@ -1431,6 +1183,9 @@ The only change to VMEC++ is the two `VmecModel` accessors. The closure and the 
 --- comment by jurasic-pf, 2026-09-29 09:21 UTC ---
 This is pending merge and finalization of https://github.com/proximafusion/vmecpp/pull/839
 
+--- comment by jurasic-pf, 2026-09-29 22:05 UTC ---
+Can you adapt this PR to build on the iteration state object thats been introduced?
+
 
 === PR #878 [OPEN] Shorten time steps that would make flux surfaces cross ===
 
@@ -1441,30 +1196,27 @@ This is pending merge and finalization of https://github.com/proximafusion/vmecp
 
 After each step, the evaluation compares `tau` with its value at the start of the step. `tau` is a quadratic form in the geometry, so along the step it is exactly quadratic in the step length. Where `tau` has fallen below the bound, this gives the largest fraction of the step that keeps it. The state then moves back along the step to that fraction, the velocity is scaled by the same fraction, and the model is evaluated again. A backup taken at the end of the step moves to its start, the last evaluated state.
 
-Steps that keep the bound are unchanged, and so is the iteration with the flag off. The C++ solve and the Python iteration of `solve_equilibrium` take the same steps.
+Steps that keep the bound are unchanged, and so is the iteration with the flag off. The C++ solve and the Python iteration of `solve_equilibrium` take the same steps. The iterations reached by a shortened step are listed as `RestartReason.SHORTENED_STEP` in `wout.restart_reasons`.
 
 ## Cause
 
-On main, a step that makes the Jacobian change sign is detected only after it is taken. The step is undone to the last backup and retried with a time step 10% smaller. After 75 of those, the run fails with `JACOBIAN_75_TIMES_BAD`.
+On main, a step that makes the Jacobian change sign is detected only after it is taken. The step is undone to the last backup and retried with a time step 10% smaller. After 75 of those, the run fails with `JACOBIAN_75_TIMES_BAD`. The time-step control of VMEC 8.52 counts a 100-fold growth of the residual towards the same 75, so the error also ends runs in which no surface crossed.
 
 ## Evidence
 
-The test set is 3000 random boundaries of the ConStellaration training set, run with the VMEC++ inputs of the ConStellaration forward model's low-fidelity preset: ns = 25, then 71, at time step 0.7. On main, 100 of them fail:
+The test set is 3000 random boundaries of the ConStellaration training set, 1003, 987 and 1010 from its three shards, run with the VMEC++ inputs of the ConStellaration forward model's low-fidelity preset: ns = 25, then 71, at time step 0.7. On main, 163 of them fail:
 
 | failure on main | count | with `jacobian_safe_step` |
 |---|---|---|
-| `JACOBIAN_75_TIMES_BAD` | 33 | 30 converge, 3 fail |
-| iteration limit | 28 | 28 fail |
-| in the first iterations | 39 | 39 fail |
+| `JACOBIAN_75_TIMES_BAD` | 24 | 12 converge, 9 fail the same way, 3 reach the iteration limit |
+| iteration limit | 80 | 80 fail |
+| in the first iterations | 59 | 59 fail |
 
-No run with the flag ends at 75 restarts. Of the 3 that still fail, 2 reach the iteration limit and 1 fails in the first iterations.
+The flag converges 9 of the 11 `JACOBIAN_75_TIMES_BAD` failures from shard 0, 3 of 3 from shard 1 and none of the 10 from shard 2. The Python iteration classifies the restarts of main's 24: 16 restart on surface crossings alone, 2 on residual growth alone and 6 on both. With the flag no step crosses surfaces, and the 12 runs that still fail restart on residual growth and slow progress.
 
-The 23 rescued boundaries converge on main at time step 0.5. Against main at 0.35, their equilibria with the flag at 0.7 differ more than main's at 0.5:
+The 12 converging runs shorten 1 to 9 steps (median 3.5), all within the first 50 iterations of a multigrid stage, and keep a median 76% of a shortened step. Main at time step 0.5 converges 13 of the 24; where both converge, the flag at 0.7 takes a median 0.98 of the iterations of main at 0.5.
 
-| median relative difference, 23 boundaries | `rmnc` | `zmns` | `iotaf` |
-|---|---|---|---|
-| main at 0.5 against main at 0.35 | 1.2e-4 | 8.6e-4 | 4.8e-4 |
-| flag at 0.7 against main at 0.35 | 3.2e-4 | 2.4e-3 | 1.6e-3 |
+With the retained fraction at 0.1% instead of 1%, the outcomes are the same. At 10%, 13 converge, 4 fail with `JACOBIAN_75_TIMES_BAD` and 7 reach the iteration limit.
 
 On the test boundary, main's own converged state moves steadily with the time step. The move is in the m = 1, n = 1 harmonic of Z, and tightening `ftol` from 1e-9 to 1e-15 leaves it unchanged. Main at 0.65, the largest time step at which main converges there, lands as far from main at 0.35 as the flag does at 0.7:
 
@@ -1477,91 +1229,35 @@ On the test boundary, main's own converged state moves steadily with the time st
 240 boundaries that converge on main were also run with the flag:
 
 - All 240 converge.
-- 233 take exactly the same iterations as on main, because none of their steps reaches the bound.
-- The other 7 take 1 to 15 restarts on main and none with the flag. Their edge iota agrees with main's to 1.4e-4.
+- 237 take the same iterations as on main. 25 have a shortened step, and their edge iota agrees with main's to 4.9e-4.
+- With the retained fraction at 10%, 216 take main's iterations and the edge iota moves by up to 1.5e-2.
 - When no step reaches the bound, the check costs 3% of the run time.
 
 ## Tests
 
 - `step_limit_kernel_test` checks the root finder, the retained fraction at the binding point of a shortened step, and `tau` along a step against its quadratic form to 1e-12.
-- `vmec_test` uses a ConStellaration boundary whose time steps at 0.7 cross flux surfaces. Without the flag it fails with `JACOBIAN_75_TIMES_BAD`. With the flag it converges, to the same state on one thread and on four.
-- `vmec_test` also runs the same boundary at time step 0.35 and `cth_like_fixed_bdy`, where no step reaches the bound. With the flag, their iterations and states are unchanged bit for bit.
-- `test_jacobian_safe_step.py` runs the Python iteration on the same boundary. It fails without the flag and converges with it, in the same number of iterations as the C++ solve.
-- The C++ and Python test suites and pre-commit pass.
+- `vmec_test` uses a ConStellaration boundary whose time steps at 0.7 cross flux surfaces. Without the flag it fails with `JACOBIAN_75_TIMES_BAD`. With the flag it converges, to the same state and with the same shortened steps in its restart-reason trace on one thread and on four.
+- `vmec_test` also runs the same boundary at time step 0.35 and `cth_like_fixed_bdy`, where no step reaches the bound. With the flag, their iterations, restart-reason traces and states are unchanged bit for bit.
+- `test_jacobian_safe_step.py` runs the Python iteration on the same boundary. It fails without the flag and converges with it, in the same number of iterations and with the same restart-reason trace as the C++ solve.
 
 ## Scope
 
 The limit acts only on time steps, so failures in the first iterations are unchanged. It does not act on restarts triggered by residual growth. The retained fraction is the constant `kJacobianRetainedFraction`.
 
+--- comment by jurasic-pf, 2026-09-29 21:32 UTC ---
+Could you explain in other words again what this PR is doing? There's a few magical constants appearing, like the 1%, but otherwhise recognizing the quadratic form is smart! 
 
-=== PR #884 [OPEN] Retry a bad initial Jacobian from a three-surface mesh ===
+~At a high level I have interpreted it as a line search in the Jacobian of the flux surface mapping. I think it makes sense as a step criterion, simce it should be faster to evaluate than the full force balance, so line searching over that parameter may generally be a good idea.~
+What implications does this have on the step size we can choose? Typically, it is limited by the problem becoming stiff at many flux surfaces and them beginning to cross.
 
---- description by CharlesCNorton, 2026-09-25 15:59 UTC ---
-**Change** - a bad initial Jacobian that the new axis guess does not fix no longer ends the run: `SolveEquilibriumLoop` returns to `Vmec::run`, which leaves the multigrid loop and runs the second pass of its `jacob_off` loop, a solve at ns = 3 to `ftol = 1e-4` followed by `ns_array`. A bad Jacobian in that pass is reported as before. The logger numbers the stages of the pass from 0.
+- Is the 1% threshold sensitive? What happens at 10% or 0.1%?
+- How often, and by how much, are steps clipped in the 30 rescued runs? Can we log it as a restart reason so it can be inspected in traces after the fact? 
+- We know that delt is typically being run above the CFL stability limit. I am not sure how these dynamics interact with that fact, does it effectively clip momentum in unstable directions?
 
-**Cause** - the `jacob_off` loop, VMEC's `jacob_off = 1` retry, could not run. It needs `status_ == BAD_JACOBIAN` after the multigrid loop, but inside the loop that status had already returned an error, or given up under `return_outputs_even_if_not_converged`. Had the pass run, `logger_.BeginStage(-1, ...)` would have read `stages_[-1]`. educational_VMEC leaves its multigrid loop on the flag and repeats it with ns = 3 inserted (`vmec.f90`), and PARVMEC does the same (`runvmec.f`).
+--- comment by CharlesCNorton, 2026-09-30 01:29 UTC ---
+@jurasic-pf It's fraction-to-the-boundary on the Jacobian: a step that would take tau below 1% of its starting value is cut to the largest fraction that doesn't (closed form, since tau is quadratic along the step).
 
-**Evidence** - the stellarator-symmetric boundaries of one shard of the ConStellaration dataset (`data/train-00002-of-00003.parquet`), with the VMEC++ input of its forward model's low-fidelity preset (ns = 25 then 71, time step 0.7). Of the 23,536 rows marked with a forward-model error, 2,896 fail in their first iterations on main; of 1,000 unmarked rows, none. On 400 of the 2,896:
-
-| outcome | main | here |
-| --- | --- | --- |
-| fails in the first iterations | 400 | 378 |
-| converges | 0 | 14 |
-| reaches the iteration limit | 0 | 6 |
-| `JACOBIAN_75_TIMES_BAD` | 0 | 2 |
-
-The 14 converged equilibria agree with main run on the same schedule with ns = 3 given first, to 2e-9 in `rmnc` and `zmns` for 13 of them and 7e-5 for the last. A boundary that still fails takes about 0.1 s longer. Built the same way, main and this branch give the same iteration counts and bit-identical `rmnc`, `zmns`, `lmns` and `iotaf` on 36 of the unmarked boundaries.
-
-The non-stellarator-symmetric and free-boundary paths, started from the same boundary at 8 threads. Each run that converges here equals main run with ns = 3 given first in `rmnc`, `zmns`, `iotaf`, the volume and `wb`, and under `lasym` in `rmns` and `zmnc`:
-
-| input | main | here |
-| --- | --- | --- |
-| `lasym`, asymmetric part zero | fails in the first iterations | converges, 971 iterations |
-| `lasym`, `rbs(3,0)` = 3e-4, `zbc(3,0)` = 2.25e-4 | fails in the first iterations | converges, 970 iterations |
-| `lasym`, `rbs(3,0)` = 1e-3, `zbc(3,0)` = 7.5e-4 | fails in the first iterations | converges, 968 iterations |
-| free boundary, `cth_like_free_bdy` at ns = 25 started from this boundary scaled to R = 0.78 | fails in the first iterations | converges, 602 iterations |
-| the same under `lasym` with the coils of `cth_like_free_bdy_asym` | fails in the first iterations | converges, 4476 iterations |
-
-Through the `lasym` path the retry reproduces the symmetric result: at 1, 2, 4 and 8 threads it takes the same 971 iterations, `rmnc` and `zmns` agree within 3.2e-12, and every asymmetric coefficient stays below 3e-16. A boundary that also fails at ns = 3 is not rescued: `cth_like_free_bdy` with its m >= 2 coefficients scaled by 8 fails in the first iterations on main, here, and on main with ns = 3 given first.
-
-**Tests** - `test_bad_initial_jacobian_is_retried_from_three_surfaces` in `tests/test_init.py` runs `constellaration_bad_initial_jacobian.json`, ConStellaration boundary `DCWhGgAc7UMiZ8VC3Lx34BQ` at ns = 25, which fails in its first iterations on main and converges here, then runs it through the `lasym` path with a zero asymmetric part and holds `rmnc` and `zmns` to the symmetric result within 2e-11.
-
-**Scope** - runs whose initial Jacobian stays bad after the axis guess; every other run takes the path it took before. The dataset is under the MIT license.
-
---- review by jurasic-pf, 2026-09-29 11:03 UTC: APPROVED ---
-
-
-=== PR #892 [OPEN] Read CSV coefficient files that begin with a UTF-8 byte order mark ===
-
---- description by CharlesCNorton, 2026-09-25 20:08 UTC ---
-**Change** - `CurveRZFourierFromCsv` and `SurfaceRZFourierFromCsv` drop a UTF-8 byte order mark from the start of the header line before comparing it.
-
-**Cause** - programs that save CSV as UTF-8, Excel's "CSV UTF-8" among them, write the bytes `EF BB BF` ahead of the first line. `StripAsciiWhitespace` leaves them in place, so such a file was rejected with `header line 'n,raxis_c,zaxis_s,raxis_s,zaxis_c' not found`, or its boundary counterpart, as a CRLF file was before #888.
-
-**Tests** - `CheckReadCoefficientsFromCsvWithByteOrderMark` in `composed_types_lib_test` reads an axis file with the mark and LF line endings and a boundary file with the mark and CRLF line endings; on main it fails at the axis header with that message.
-
-**Scope** - the two CSV readers, whose callers are `surface_geometry_mockup` and the tests. A file without the mark reads as before.
-
-
-=== PR #894 [OPEN] Return an error for a thread count below 1 instead of aborting ===
-
---- description by CharlesCNorton, 2026-09-25 21:54 UTC ---
-**Change** - `Vmec::FromIndata`, through which both `vmecpp::run` overloads build the solver, returns `kInvalidArgument` for a `max_threads` below 1, naming it, before the constructor hands the count to `FlowControl`. `vmec_standalone` parses its thread count with `absl::SimpleAtoi` and exits 1 with a usage message when the argument is not a positive integer, where it read it with `std::atoi`.
-
-**Cause** - `get_max_threads` in `flow_control.cc` holds the count to `CHECK_GT(max_threads.value(), 0)`, which aborts the process. `vmecpp.run` in Python checks the count first and raises `RuntimeError`, but nothing below it does: `_vmecpp.run(..., max_threads=0)` took the Python interpreter down, and `vmec_standalone` aborted for 0, for a negative count and for an argument `std::atoi` reads as 0, such as `abc`. `std::atoi` also read `1x` as 1, and its result for a value outside `int` is undefined.
-
-**Evidence** - main and this branch:
-
-| call | main | here |
-| --- | --- | --- |
-| `vmec_standalone solovev.json 4` | exit 0 | exit 0 |
-| `vmec_standalone solovev.json 0`, `-2` or `abc` | exit 134, `Check failed: max_threads.value() > 0` at `flow_control.cc:37` | exit 1, `n_max_threads must be a positive integer, but is '0'` |
-| `vmec_standalone solovev.json 1x` or `99999999999` | runs | exit 1, `n_max_threads must be a positive integer, but is '1x'` |
-| `_vmecpp.run(indata, max_threads=0)` | the interpreter aborts at the same check | `AttributeError: The number of threads must be >= 1, but is 0. To use all available threads, leave max_threads unset.` |
-
-**Tests** - `CheckRunRejectsAThreadCountBelowOne` in `vmec_test` requires `kInvalidArgument` from `vmecpp::run` for 0 and -2; on main the test process aborts at the check.
-
-**Scope** - the check in `get_max_threads` stays for a `Vmec` constructed directly. `vmecpp.run` in Python rejected these counts already and is unchanged.
+Reran on all three shards (the description was shard 0 only): 12 of 24 `JACOBIAN_75_TIMES_BAD` failures converge (9/11, 3/3, 0/10 by shard). The rest fail on residual blow-ups, which the flag doesn't address. 0.1% gives identical results; 10% trades one extra rescue for four iteration-limit runs. Shortened steps are now logged as `RestartReason.SHORTENED_STEP` (ccb50b61). Updating description.
 
 
 === PR #897 [OPEN] Size the OpenMP teams to the threads the runtime grants ===
@@ -1585,23 +1281,6 @@ Without a limit, solovev on 2 and 4 threads and cth_like_free_bdy on 2 threads g
 **Scope** - Without a thread limit or an enclosing parallel region every team gets what it requests, and the partitioning is unchanged.
 
 
-=== PR #902 [OPEN] Accept the mgrid mode N that simsopt writes and LIBSTELL assigns to mgrid files without a mode ===
-
---- description by CharlesCNorton, 2026-09-27 11:20 UTC ---
-**Change** - `MgridModeType` accepts `N` besides `R`, `S` and the empty string, and its docstring lists the modes in the order of the literal, `[Raw, Scaled, None, Unset]`; it read `[Scaled, Raw, Unset]`.
-
-**Cause** - simsopt's mgrid writer (`MGrid.write_netcdf`, `simsopt/field/mgrid.py`) sets `mgrid_mode = 'N'`, and LIBSTELL's `read_mgrid_nc` (`mgrid_mod.f`) sets it to `'N'` for a file without the variable, which `wrout.f` writes into the wout. `VmecWOut` validated `mgrid_mode` against `R`, `S` and the empty string. The C++ mgrid reader copies the mode into the wout and reads it nowhere else.
-
-**Evidence** - `cth_like_free_bdy` against an mgrid file written from the `coils.cth_like` response table with `mgrid_mode` set to `N`: on main, `vmecpp.run` raises a `ValidationError` on `mgrid_mode` when it builds the `VmecWOut`; here the wout reports `N`, and a wout file saved from it loads back with `N`.
-
-**Tests** - `test_free_boundary_run_with_mgrid_mode_none` in `tests/test_init.py`, which fails on main with that `ValidationError`. It writes its mgrid file from the coils response table and reads no git-lfs data.
-
-**Scope** - `MgridModeType` only.
-
---- comment by jurasic-pf, 2026-09-27 16:16 UTC ---
-Instead of explicitly supporting N as a third mode, i would prefer normalizing it to unset
-
-
 === PR #903 [OPEN] Return NESTOR's boundary vacuum field with return_vacuum_field ===
 
 --- description by CharlesCNorton, 2026-09-27 11:40 UTC ---
@@ -1614,82 +1293,6 @@ Instead of explicitly supporting N as a third mode, i would prefer normalizing i
 **Tests** - `test_threed1_free_boundary_bindings` in `tests/test_init.py`; `vmec_indata_test` checks the field's default, its HDF5 round trip and its copy; `test_vmec_output_serialization` passes over output tables a run leaves absent.
 
 **Scope** - output only; the solve is unchanged.
-
-
-=== PR #908 [OPEN] Evaluate the state a run returns when it runs out of iterations ===
-
---- description by CharlesCNorton, 2026-09-27 13:27 UTC ---
-**Change** - when a run ends at the iteration limit, `Vmec::run` evaluates the model once more at the state it returns before it computes the output, so the fields, the tables computed from them (`jxbout`, `mercier`, `threed1`) and `fsqr`, `fsqz`, `fsql` belong to the returned coefficients. The evaluation is the one the next iteration would begin with, without its time step. A Jacobian that changes sign at the returned state is reported as `BAD_JACOBIAN`, and an error from the evaluation goes through the recovery that errors in the iterations get, which `SolveEquilibrium` and the new `EvaluateFinalState` share as `RecoverFromThreadErrors`.
-
-**Cause** - `Evolve` evaluates the forces and then takes a time step, and a run that stops at `niter` leaves the loop after that step, so its output paired the coefficients of the stepped state with the fields and residuals of the state before it. Fortran VMEC calls `funct3d` again from `fileout`, with `iequi = 1`, to recompute the geometry and the fields at the final state, and writes the residuals of its last iteration. A converged run takes no step after its last evaluation, so its output was already consistent.
-
-**Evidence** - `cth_like_fixed_bdy` converges in 119 iterations. Stopped at 59 with `return_outputs_even_if_not_converged`, main reports `fsqr = 4.31e-4`, the residual of the state before the last step, while the returned coefficients have `fsqr = 2.74e-4`, the value a 60-iteration run computes in its last evaluation. The fields of that output disagree with its own coefficients: the half-width `ygeo` of the surfaces differs by up to 9.6e-4 of its largest value between the real-space geometry and the odd-m sum of `rmnc`, and the axis radius behind `b0` differs from the sum of `raxis_cc` by 1.1e-4 m, where the converged output agrees with itself to 8e-16 and 0. With this change the 59-iteration output reports `fsqr = 2.74e-4`, its fields agree with its coefficients to 6e-16 and 0, and the `gmnc` of the C++ output stage agrees to 1.9e-14, relative to its largest coefficient, with the one `vmecpp.run` recomputes from the coefficients, from which main's differs by 2.4e-3. With `delt = 5` one time step makes the flux surfaces of `cth_like_fixed_bdy` cross; main returns that state with `ier_flag = 0`, and this change reports `BAD_JACOBIAN` for it, as it does for `solovev` under the same step.
-
-**Tests** - `OutputAtTheIterationLimitDescribesTheReturnedState` in `vmec_test` runs `cth_like_fixed_bdy` for 59 iterations, halts a second run at its 60th evaluation, which is at the state the first returns, and requires `fsqr`, `fsqz`, `fsql`, `wb` and `wp` of the first output to equal those of the second run bitwise. `OutputAtTheIterationLimitReportsABadJacobian` runs one iteration of `cth_like_fixed_bdy` with `delt = 5` and expects `BAD_JACOBIAN`. Both fail on main.
-
-**Scope** - converged runs do not reach the new evaluation, and a run that ends at the iteration limit costs one more force evaluation. As for a converged run, the residual traces (`force_residual_r`, `fsqt` and the others) end at the last iteration and leave out the evaluation of the returned state. Unlike Fortran VMEC, the output reports the residuals of the returned state rather than those of its last iteration.
-
-
-=== PR #912 [OPEN] Check VMEC++ against exact three-dimensional MHD equilibria in CI ===
-
---- description by CharlesCNorton, 2026-09-29 08:19 UTC ---
-**Change** - `examples/exact_equilibria.py` writes VMEC++ inputs for members of both families of exact equilibria in Landreman, [arXiv:2609.26742](https://arxiv.org/abs/2609.26742) (with the data of [landreman/analytic_3d_equilibria](https://github.com/landreman/analytic_3d_equilibria)), runs VMEC++ over radial and angular resolutions, and measures against the exact solution, at VMEC++'s own points, quantities that do not depend on its poloidal angle: `psi` on each full-grid surface against the surface's flux label, the magnetic axis, the field vector at the half-grid points, the enclosed toroidal current `buco` and its radial derivative `jcurv`, the last three also for `s >= 1/4`, and `buco / s` at the innermost half-grid point against its exact limit at the axis. The runs of `sheared` start from the coarser grids of 25, 100 and 400 below their `ns`, and every grid runs to `ftol = 1e-18` up to `ns = 200` and to `1e-16` above. The script prints the deviations with their observed orders in `h = 1/(ns - 1)`, writes them with `--out` as JSON and markdown with plots against `h`, against `mpol` and of `buco / s` over `s`, and ends with five checks on `sheared`:
-
-- convergence in `ns` at O(h): `psi`, the axis, `B` and the current converge at fitted order >= 0.9;
-- convergence in `mpol`, `ntor`: `B` for `s >= 1/4` falls at every step of the angular scan, and `psi`, the axis and `B` for `s >= 1/4` fall at least 100-fold from `mpol = 4`, `ntor = 2` to `mpol = 8`, `ntor = 6`;
-- the magnetic axis converges at fitted order >= 0.9 and lies within `2e-4 h` metres of the exact axis at the finest `ns`;
-- `B` for `s >= 1/4` converges at fitted order >= 1.5, and `jcurv` at a lower order than the current it differentiates, over the whole profile and for `s >= 1/4`;
-- the enclosed current for `s >= 1/4` converges at order >= 1.8 between every pair of resolutions, and `buco / s` at the innermost half-grid point approaches its exact limit at every step.
-
-With `--check` a failed check fails the run. The suites are `demo`, which the example-scripts job runs, `quick` up to `ns = 100` and `full` up to `ns = 1000`.
-
-`.github/workflows/exact_equilibria.yaml` runs the quick suite with `--check` on every pull request and push to main, and the full suite, one job per member, on release and on manual request; each writes its tables and checks to the job summary and uploads the plots and data.
-
-`tests/test_exact_equilibrium.py` holds `sheared` at `ns = 25` to tolerances and requires the error in the enclosed current to fall at least 3.5-fold from `ns = 13` to `ns = 25`.
-
-| member | eps, S, lambda, k_b | iota | beta |
-|---|---|---|---|
-| `sheared` | 0.6, 2.2, 2.97, 0.2 | 4.343 to 4.367 | 1.9% |
-| `sheared-near-3.5` | 1, 1.75, 2.65, 0.2 | 3.429 to 3.438 | 1.8% |
-| `sheared-A`, the repository's case A | 1.08, 3, 3.5, 0.7 | 5.689 to 6.218 | 19.7% |
-| `iota2`, `eps = 0.25`, `delta = 1/64` | | 2 | 3.2% |
-
-**Cause** - The paper's field, flux label and pressure are elementary functions of position, with nested flux surfaces and no continuous symmetry, so VMEC++'s surfaces, axis, field and currents can be compared with the exact ones wherever VMEC++ puts its points. The paper's poloidal angles turn opposite to VMEC's theta, so VMEC's iota is minus the paper's. At `ftol = 1e-16` the surfaces of `sheared` carry a helical displacement `cos(theta + 4 phi)`, resonant at iota = 4, whose amplitude the residual does not fix: at `ns = 200` it is 1.8e-5 of the boundary `psi` after the coarser grids, 9.9e-5 on a single grid and 2.6e-4 at `ftol = 1e-14`, VMEC++'s angular grid (`ntheta = 60`, `nzeta = 48`) leaves it as it is, and on a single grid at `ftol = 1e-18` it is 9.4e-7. The residual VMEC++ reaches rises with `ns`, from 8e-23 at `ns = 25` to 2e-20 at `ns = 100`.
-
-**Evidence** - The quick suite, `sheared` at `mpol = 12`, `ntor = 10`, every run converged to 1e-18:
-
-| ns | psi | axis, m | B | B, s >= 1/4 | current | current, s >= 1/4 | jcurv, s >= 1/4 | buco / s at the axis |
-|---|---|---|---|---|---|---|---|---|
-| 13 | 1.9e-4 | 8.0e-6 | 1.3e-4 | 5.7e-5 | 1.7e-5 | 1.7e-5 | 5.3e-6 | 3.1e-4 |
-| 25 | 5.2e-5 | 4.2e-6 | 4.9e-5 | 1.5e-5 | 4.2e-6 | 4.2e-6 | 1.2e-6 | 1.6e-4 |
-| 50 | 1.9e-5 | 1.6e-6 | 2.1e-5 | 2.6e-6 | 1.2e-6 | 9.8e-7 | 5.6e-7 | 9.1e-5 |
-| 100 | 1.3e-5 | 8.2e-7 | 1.8e-5 | 1.6e-6 | 4.3e-7 | 2.4e-7 | 9.5e-8 | 5.9e-5 |
-
-All five checks pass. The fitted orders are 1.31 for `psi`, 1.11 for the axis, 0.96 for `B` and 1.75 for the current. At `ns = 100`, `B` for `s >= 1/4` falls from 2.2e-3 at `mpol = 4`, `ntor = 2` through 5.6e-5, 3.4e-6, 2.9e-6, 1.6e-6 and 6.4e-7 to 4.0e-7 at `mpol = 16`, `ntor = 14`, while `psi` and the axis fall 963 and 506-fold to `mpol = 8`, `ntor = 6` and stay at their radial floor above it. The axis is 8.2e-7 m from the exact axis at `ns = 100`. `B` for `s >= 1/4` converges at order 1.77, and `jcurv` at -0.39 over the whole profile against the current's 1.75 and at 1.81 for `s >= 1/4` against 2.03. The current for `s >= 1/4` converges at orders 2.04, 2.03 and 2.02.
-
-- The whole-profile deviations are set at the axis. The relative error of `buco` at the four innermost half-grid points does not fall with `ns`: in the full suite at `ftol = 1e-16` it is 3.3e-5, 2.0e-5, 1.2e-5 and 7.6e-6 at `ns = 400` and 2.4e-5, 1.7e-5, 1.1e-5 and 7.8e-6 at `ns = 1000`, so the whole-profile current converges at order 1.07 there and `jcurv` does not converge at the innermost full-grid points. From `ns = 50` to 100, `psi` and `B` over the whole profile converge at orders 0.55 and 0.24.
-- The exact limit of `buco / s` at the axis agrees with a direct quadrature of the current to 4e-13, and the boundary VMEC++ receives deviates from the exact surface by 3.3e-9 of the boundary `psi` at `mpol = 12`, `ntor = 10`.
-- `sheared-near-3.5` converges to 1e-18 at `ns = 13` and 25 and stops at 1.3e-17 and 1.4e-15 at `ns = 50` and 100; its current for `s >= 1/4` converges at orders 2.07, 2.10 and 2.02. `sheared-A`, whose iota crosses 6, stops between 3e-9 and 7e-8, and `iota2` between 4e-14 and 3e-11.
-- The repository's cases B and C are not members: their boundaries deviate from the exact surfaces by 7e-2 and 4e-1 of the boundary `psi` at `mpol = 12`, `ntor = 10`, and by 4e-3 and 5e-2 at `mpol = 24`, `ntor = 22`.
-
-**Tests** - `pytest tests/test_exact_equilibrium.py` passes in 4 s, and the pinned `ruff` and `docformatter` pass on the files.
-
-**Scope** - One example, one test, one workflow. Nothing in the solver or the Python layer changes. The other jobs fail on main's Mercier renames from #563, which #914 completes.
-
---- comment by jurasic-pf, 2026-09-29 08:36 UTC ---
-Landreman also has the public repository with the exact equilibria from the different families https://github.com/landreman/analytic_3d_equilibria
-
-Great that you picked this up, I think this is a very valuable verification suite, and I was also prototyping what to do with it.
-We should aim for more than just unit tests imo in this case, and really check correctness/try to surface any remaining bugs in this excercise. We can split it into a cheaper subset that runs e.g. up to ns=100 and a more expensive V&V suite running up to ns=1000
-
-Let's check and generate V&V plots in CI for (among others) the following:
-- Does the `ns` convergence hold to the expected order (O(h))
-- Does the `mpol`, `ntor` convergence hold to the expected order (spectral)
-- Is the axis geometry recovered to numerical precision?
-- Quantities of B should converge to high precision, derivative quantities not as much.
-- Enclosed current converges at O(h^2) and has the right limit behavior
-
-This can be built as a sequence of PRs, but overall I would aim for something in that direction.
 
 
 === PR #915 [OPEN] Test the half-grid order, a forced current sheet and free-boundary balance ===
@@ -1925,6 +1528,29 @@ input is below the bench's noise floor (~3 %); the change brings
 every reduction in the hot path onto the uniform slot pattern, which
 keeps the codebase easier to reason about and removes the last of
 the `single{reset}/atomic/barrier/single{finalize}` boilerplate.
+
+
+=== PR #512 [CLOSED, not merged, draft] WIP: partitioning investigation artifacts ===
+
+--- description by jurasic-pf, 2026-05-04 18:26 UTC ---
+Investigation-only branch carrying the diagnostic scripts and the
+running notes that informed the imbalance-aware radial partitioning
+work on partition-aware. Intentionally not merged to main.
+
+* OPTIMIZATION_REPORT.md -- running write-up of measurements (baseline,
+  per-thread function-body times, sweep tables, conclusions).
+* scripts/measure_boundary_overhead.py -- per-thread cumulative time
+  inside computeJacobian.body across NS values; fits the additive
+  boundary-overhead model.
+* scripts/simulate_partition.py -- predicts makespan under both the
+  multiplicative and additive partitioning models, useful for tuning
+  the kBoundarySurfacesOff* constants.
+* scripts/sweep_partition_offsets.py -- A/B wall-clock sweep across
+  (axis_off, lcfs_off) combinations, used to verify the partitioner
+  empirically.
+* examples/data/input.w7x -- bumped NS_ARRAY to 300 and tightened
+  FTOL_ARRAY to 1e-9 so the per-iteration savings actually show up
+  above the bench noise floor on this longer-running case.
 
 
 === PR #513 [CLOSED, not merged, draft] FFTX Spiral custom FFT kernels ===
@@ -3623,6 +3249,25 @@ The new test fails on all three names without the validation change and passes w
 Superseded by #832, which implements the three profiles instead of rejecting them.
 
 
+=== PR #799 [CLOSED, not merged] Recover cold initial-Jacobian failures through the coarse bootstrap ===
+
+--- description by philippbogdan, 2026-09-06 10:08 UTC ---
+A cold run can reject its first radial grid with a bad Jacobian even though a three-surface bootstrap reaches the requested equilibrium. Both the inner solver and grid driver returned before the existing fallback could execute. Allow that initial failure to reach the driver, restore the input axis and radial state, and retry once at three surfaces before the original grid sequence. Correct the logger's stage index for the inserted stage. The public single-grid solver keeps its existing interface and error handling.
+
+On a frozen set of 53 historical QUASR initial-Jacobian failures, the baseline converges on 0 cases and this change on the same 15 cases in each of three repetitions: 5 of 12 discovery cases and 10 of 41 held-out cases. Both use identical boundary coefficients, profiles, field tables, final resolution and `1e-9` tolerance. This is an initialization-robustness result on a selected stress set, not a population failure-rate or physical-accuracy claim.
+
+The PR includes the frozen source hashes, portable paired benchmark, measured ledgers, and regression tests. The numerical tests compare the complete recovered geometry and force history with an explicit cold-three solve. A regenerated educational_VMEC reference checks geometry, lambda, iota, pressure and flux. The corresponding Fortran fix is [educational_VMEC #29](https://github.com/jonathanschilling/educational_VMEC/pull/29).
+
+Validation details and physical-diagnostic limits are recorded in `benchmarks/initial_jacobian_recovery/README.md`. Native VMEC tests pass on macOS arm64; the paired Python regression run found the same six failures on baseline and the recovery implementation, with 201 passes, two skips and 36 deselections. That comparison preceded the final interface-preserving wrapper refactor; native tests, Python reference checks and independent API probes were repeated on the final build. Independent API checks cover fixed/free boundaries, finite pressure/current, one/four threads, all output modes, hot starts, later-stage failures and insufficient budgets.
+
+--- comment by philippbogdan, 2026-09-06 16:13 UTC ---
+The conda job has no git-lfs, so it read the reference wout as a pointer file; the tsan run of vmec_test exceeded 900 s.
+Follow-up commit deselects the new Python test there, moves the LFS rule into src/vmecpp/cpp/.gitattributes, and trims the C++ test sweep.
+
+--- comment by jurasic-pf, 2026-09-29 21:50 UTC ---
+merged a similar pr by charles credited to the two of you
+
+
 === PR #803 [CLOSED, not merged] Take indata2json at the commit that keeps a trailing zero spline value ===
 
 --- description by CharlesCNorton, 2026-09-06 16:21 UTC ---
@@ -3665,6 +3310,32 @@ The rewritten loop integrates the interpolant from 0 to x piece by piece, taking
 
 --- comment by CharlesCNorton, 2026-09-06 21:42 UTC ---
 Folded into #812, which now fixes both line-segment evaluators together as requested there. Closing.
+
+
+=== PR #814 [CLOSED, not merged, draft] Propose shipping Enzyme-enabled kernels in pip wheels (follow-up to #710) ===
+
+--- description by Copilot, 2026-09-06 21:23 UTC ---
+#710 wires an Enzyme-derived exact JVP/VJP of the force kernel into `vmecpp_core` behind `-DVMECPP_ENABLE_ENZYME=ON`, but that flag is never set in the `cibuildwheel`-built pip wheels — it's only exercised by a dedicated CI job with its own from-scratch Clang/LLVM + Enzyme toolchain. This adds a design proposal for closing that gap.
+
+## Changes
+
+- **`docs/enzyme_wheel_packaging.md`**: proposal doc covering
+  - Reusing the existing CMake "prebuilt Enzyme object" mode (`VMECPP_ENZYME_JVP_OBJECT`/`VMECPP_ENZYME_VJP_OBJECT`) instead of installing Clang/LLVM/Enzyme inside `manylinux`/macOS `cibuildwheel` containers
+  - Compiling the two Enzyme translation units in a small, separate, cacheable CI job per wheel target, then feeding the resulting `.o` files into the normal wheel build via `CMAKE_ARGS`
+  - Why this keeps every other translation unit compiled exactly as today, so non-adjoint users see no change to the code they exercise, and why Enzyme introduces no new runtime dependency (it only runs at build time)
+  - Concrete checks for no performance regression: symbol/disassembly diffing of unaffected translation units, and extending the existing exact-HVP benchmark with a forward-solve timing comparison run against an actual built wheel
+  - Open questions: which wheel targets to prioritize, prebuilt-object staleness/versioning, Windows being out of scope for now
+- **`docs/index.md`**: links the new doc from the toctree
+
+## Scope
+
+This is a design proposal only, not an implementation. The actual toolchain and CI wiring is substantial, cross-platform work intended to be done and validated incrementally in follow-up PRs, building on this proposal.
+
+--- comment by jurasic-pf, 2026-09-07 08:05 UTC ---
+@copilot Follow the implementation proposal added in this PR
+
+--- comment by jurasic-pf, 2026-09-29 22:11 UTC ---
+****
 
 
 === PR #826 [CLOSED, not merged, draft] Fix missing quasisymmetry re-export causing "Test conda env" job failure ===

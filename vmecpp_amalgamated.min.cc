@@ -17,7 +17,7 @@
 //
 // Unofficial redistribution; not affiliated with or endorsed by Proxima Fusion.
 //
-// Provenance: github.com/proximafusion/vmecpp v0.7.5-43-g2b46babc
+// Provenance: github.com/proximafusion/vmecpp v0.7.5-56-gd358bbd4
 //
 // Scope matches vmecpp_amalgamated.cc exactly: the whole solver, fixed and
 // free boundary, every profile parameterization, the complete output suite and
@@ -3321,8 +3321,14 @@ const SurfaceRZFourier& surface);
 #include "absl/log/check.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/strip.h"
 
 namespace composed_types {
+
+namespace {
+
+constexpr absl::string_view kUtf8ByteOrderMark = "\xEF\xBB\xBF";
+}
 
 absl::Status IsVector3dFullyPopulated(const Vector3d& vector,
 absl::string_view vector_name) {
@@ -3543,7 +3549,8 @@ if (!std::getline(axis_coefficients_ss, header_line)) {
 return absl::InvalidArgumentError("cannot read header line");
 }
 
-if (absl::StripAsciiWhitespace(header_line) !=
+if (absl::StripAsciiWhitespace(
+absl::StripPrefix(header_line, kUtf8ByteOrderMark)) !=
 "n,raxis_c,zaxis_s,raxis_s,zaxis_c") {
 return absl::NotFoundError(
 "header line 'n,raxis_c,zaxis_s,raxis_s,zaxis_c' not found");
@@ -3744,7 +3751,8 @@ if (!std::getline(boundary_coefficients_ss, header_line)) {
 return absl::InvalidArgumentError("cannot read header line");
 }
 
-if (absl::StripAsciiWhitespace(header_line) != "n,m,rbc,zbs,rbs,zbc") {
+if (absl::StripAsciiWhitespace(absl::StripPrefix(
+header_line, kUtf8ByteOrderMark)) != "n,m,rbc,zbs,rbs,zbc") {
 return absl::NotFoundError("header line 'n,m,rbc,zbs,rbs,zbc' not found");
 }
 
@@ -4112,8 +4120,6 @@ static constexpr double kMagneticFieldBlendingFactor = 0.05;
 static constexpr double kVacuumPermeability = 4.0e-7 * M_PI;
 
 static constexpr double kIonLarmorRadiusCoefficient = 3.2e-3;
-
-static constexpr double kLambdaPreconditionerDampingFactor = 2.0;
 
 static constexpr double kLambdaPreconditionerZeroGuard = -1.0e-10;
 
@@ -4516,9 +4522,15 @@ double tcon0;
 
 bool lforbal;
 
+double lambda_preconditioner_scale;
+
 IterationStyle iteration_style;
 
 bool return_outputs_even_if_not_converged;
+
+bool lgiveup;
+
+double fgiveup;
 
 Eigen::VectorXd raxis_c;
 
@@ -9020,6 +9032,7 @@ return coeffs;
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -9209,6 +9222,32 @@ aux_s[aux_s.size() - 1]));
 return absl::OkStatus();
 }
 
+absl::Status CheckSumCossqCoefficients(const std::string& pcurr_type,
+const Eigen::VectorXd& ac) {
+const auto coefficient = [&ac](int i) { return i < ac.size() ? ac[i] : 0.0; };
+if (pcurr_type == "sum_cossq_s" || pcurr_type == "sum_cossq_sqrts") {
+const double num_humps = coefficient(0);
+if (num_humps != std::floor(num_humps) || num_humps < 2.0 ||
+num_humps > 20.0) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'pcurr_type' is '%s', so 'ac[0]' must be the "
+"number of cos^2 humps, an integer from 2 to 20, but is %g\n",
+pcurr_type, num_humps));
+}
+} else if (pcurr_type == "sum_cossq_s_free") {
+for (int i = 0; i < 7; ++i) {
+if (coefficient(3 * i) != 0.0 && coefficient(3 * i + 2) <= 0.0) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'pcurr_type' is 'sum_cossq_s_free', so 'ac[%d]' "
+"must be the positive half-width of the hump with amplitude "
+"'ac[%d]' = %g, but is %g\n",
+3 * i + 2, 3 * i, coefficient(3 * i), coefficient(3 * i + 2)));
+}
+}
+}
+return absl::OkStatus();
+}
+
 static constexpr Eigen::VectorXd::Index kRationalDenominatorStart = 10;
 
 absl::Status CheckRationalProfile(const std::string& type_key,
@@ -9360,8 +9399,11 @@ aphi[0] = 1.0;
 delt = 1.0;
 tcon0 = 0.5;
 lforbal = false;
+lambda_preconditioner_scale = 0.5;
 iteration_style = IterationStyle::VMEC_8_52;
 return_outputs_even_if_not_converged = false;
+lgiveup = false;
+fgiveup = 30.0;
 
 raxis_c.setZero(ntor + 1);
 zaxis_s.setZero(ntor + 1);
@@ -9478,8 +9520,12 @@ WriteH5Dataset(nstep, "/indata/nstep", file);
 WriteH5Dataset(delt, "/indata/delt", file);
 WriteH5Dataset(tcon0, "/indata/tcon0", file);
 WriteH5Dataset(lforbal, "/indata/lforbal", file);
+WriteH5Dataset(lambda_preconditioner_scale,
+"/indata/lambda_preconditioner_scale", file);
 WriteH5Dataset(return_outputs_even_if_not_converged,
 "/indata/return_outputs_even_if_not_converged", file);
+WriteH5Dataset(lgiveup, "/indata/lgiveup", file);
+WriteH5Dataset(fgiveup, "/indata/fgiveup", file);
 
 WriteH5Dataset(ns_array, "/indata/ns_array", file);
 WriteH5Dataset(ftol_array, "/indata/ftol_array", file);
@@ -9578,12 +9624,24 @@ ReadH5Dataset(m_indata.delt, "/indata/delt", from_file);
 ReadH5Dataset(m_indata.tcon0, "/indata/tcon0", from_file);
 ReadH5Dataset(m_indata.lforbal, "/indata/lforbal", from_file);
 
+if (H5Lexists(from_file.getId(), "/indata/lambda_preconditioner_scale", 0) ==
+1) {
+ReadH5Dataset(m_indata.lambda_preconditioner_scale,
+"/indata/lambda_preconditioner_scale", from_file);
+} else {
+m_indata.lambda_preconditioner_scale = 0.5;
+}
+
 if (H5Lexists(from_file.getId(),
 "/indata/return_outputs_even_if_not_converged", 0) == 1) {
 ReadH5Dataset(m_indata.return_outputs_even_if_not_converged,
 "/indata/return_outputs_even_if_not_converged", from_file);
 } else {
 m_indata.return_outputs_even_if_not_converged = false;
+}
+if (from_file.nameExists("/indata/lgiveup")) {
+ReadH5Dataset(m_indata.lgiveup, "/indata/lgiveup", from_file);
+ReadH5Dataset(m_indata.fgiveup, "/indata/fgiveup", from_file);
 }
 
 ReadH5Dataset(m_indata.ns_array, "/indata/ns_array", from_file);
@@ -10056,6 +10114,16 @@ if (maybe_lforbal->has_value()) {
 vmec_indata.lforbal = maybe_lforbal->value();
 }
 
+auto maybe_lambda_preconditioner_scale =
+JsonReadDouble(j, "lambda_preconditioner_scale");
+if (!maybe_lambda_preconditioner_scale.ok()) {
+return maybe_lambda_preconditioner_scale.status();
+}
+if (maybe_lambda_preconditioner_scale->has_value()) {
+vmec_indata.lambda_preconditioner_scale =
+maybe_lambda_preconditioner_scale->value();
+}
+
 auto maybe_iteration_style = JsonReadString(j, "iteration_style");
 if (!maybe_iteration_style.ok()) {
 return maybe_iteration_style.status();
@@ -10078,6 +10146,22 @@ return maybe_return_outputs_even_if_not_converged.status();
 if (maybe_return_outputs_even_if_not_converged->has_value()) {
 vmec_indata.return_outputs_even_if_not_converged =
 maybe_return_outputs_even_if_not_converged->value();
+}
+
+auto maybe_lgiveup = JsonReadBool(j, "lgiveup");
+if (!maybe_lgiveup.ok()) {
+return maybe_lgiveup.status();
+}
+if (maybe_lgiveup->has_value()) {
+vmec_indata.lgiveup = maybe_lgiveup->value();
+}
+
+auto maybe_fgiveup = JsonReadDouble(j, "fgiveup");
+if (!maybe_fgiveup.ok()) {
+return maybe_fgiveup.status();
+}
+if (maybe_fgiveup->has_value()) {
+vmec_indata.fgiveup = maybe_fgiveup->value();
 }
 
 const int expected_axis_size = vmec_indata.ntor + 1;
@@ -10363,9 +10447,12 @@ output["aphi"] = aphi;
 output["delt"] = delt;
 output["tcon0"] = tcon0;
 output["lforbal"] = lforbal;
+output["lambda_preconditioner_scale"] = lambda_preconditioner_scale;
 output["iteration_style"] = ToString(iteration_style);
 output["return_outputs_even_if_not_converged"] =
 return_outputs_even_if_not_converged;
+output["lgiveup"] = lgiveup;
+output["fgiveup"] = fgiveup;
 
 output["raxis_c"] = raxis_c;
 output["zaxis_s"] = zaxis_s;
@@ -10616,6 +10703,11 @@ if (absl::Status status = CheckRationalProfile(
 !status.ok()) {
 return status;
 }
+if (absl::Status status =
+CheckSumCossqCoefficients(vmec_indata.pcurr_type, vmec_indata.ac);
+!status.ok()) {
+return status;
+}
 
 if (vmec_indata.ncurr == 0) {
 if (vmec_indata.bloat != 1.0) {
@@ -10662,10 +10754,25 @@ return absl::InvalidArgumentError(absl::StrFormat(
 vmec_indata.delt));
 }
 
+if (vmec_indata.lgiveup && vmec_indata.fgiveup <= 0.0) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'fgiveup' is a multiple of ftol and must be positive "
+"when 'lgiveup' is set, but is %g\n",
+vmec_indata.fgiveup));
+}
+
 if (vmec_indata.tcon0 < 0.0 || vmec_indata.tcon0 > 1.0) {
 return absl::InvalidArgumentError(absl::StrFormat(
 "input variable 'tcon0' has to be in the range [0.0, 1.0], but is %g\n",
 vmec_indata.tcon0));
+}
+
+if (!(vmec_indata.lambda_preconditioner_scale > 0.0) ||
+!std::isfinite(vmec_indata.lambda_preconditioner_scale)) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"input variable 'lambda_preconditioner_scale' has to be positive and "
+"finite, but is %g\n",
+vmec_indata.lambda_preconditioner_scale));
 }
 
 if (vmec_indata.iteration_style != IterationStyle::VMEC_8_52 &&
@@ -16343,6 +16450,9 @@ double evalLineSegmentIntegrated(const Eigen::VectorXd& splineKnots,
 const Eigen::VectorXd& splineValues,
 double x);
 double evalNiceQuadratic(const Eigen::VectorXd& coeffs, double x);
+double evalSumCossqS(const Eigen::VectorXd& coeffs, double x);
+double evalSumCossqSqrts(const Eigen::VectorXd& coeffs, double x);
+double evalSumCossqSFree(const Eigen::VectorXd& coeffs, double x);
 
 void AccumulateVolumeAveragedSpectralWidth() const;
 
@@ -16423,6 +16533,9 @@ FourierGeometry(FourierGeometry&& other) noexcept;
 FourierGeometry& operator=(FourierGeometry&& other) noexcept;
 
 void interpFromBoundaryAndAxis(const FourierBasisFastPoloidal& t,
+const Boundaries& b, const RadialProfiles& p);
+
+void setM1GaugeFromBoundary(const FourierBasisFastPoloidal& t,
 const Boundaries& b, const RadialProfiles& p);
 
 void InitFromState(const FourierBasisFastPoloidal& fb,
@@ -16660,6 +16773,29 @@ basis_norm * interpolationWeight * b.zbss[idx_bdy];
 }
 }
 }
+}
+}
+}
+}
+
+void FourierGeometry::setM1GaugeFromBoundary(const FourierBasisFastPoloidal& t,
+const Boundaries& b,
+const RadialProfiles& p) {
+const int m = 1;
+if (s_.mpol <= m) {
+return;
+}
+for (int jF = nsMin_; jF < nsMax_; ++jF) {
+const double interpolationWeight = p.sqrtSF[jF - r_.nsMinF1];
+for (int n = 0; n < s_.ntor + 1; ++n) {
+const int idx_bdy = m * (s_.ntor + 1) + n;
+const int idx_fc = ((jF - nsMin_) * s_.mpol + m) * (s_.ntor + 1) + n;
+const double basis_norm = 1.0 / (t.mscale[m] * t.nscale[n]);
+if (s_.lthreed) {
+zmncs[idx_fc] = basis_norm * interpolationWeight * b.zbcs[idx_bdy];
+}
+if (s_.lasym) {
+zmncc[idx_fc] = basis_norm * interpolationWeight * b.zbcc[idx_bdy];
 }
 }
 }
@@ -18815,7 +18951,7 @@ int vac_num_threads, int signOfJacobian, int nvacskip,
 VacuumPressureState* m_vacuum_pressure_state);
 
 void setFromINDATA(int ncurr, double adiabaticIndex, double tCon0,
-bool lforbal);
+bool lforbal, double lambda_preconditioner_scale);
 
 void evalFResInvar(const Eigen::Vector3d& localFResInvar);
 
@@ -19073,6 +19209,7 @@ Eigen::VectorXd bLambda;
 Eigen::VectorXd dLambda;
 Eigen::VectorXd cLambda;
 Eigen::VectorXd lambdaPreconditioner;
+double lambda_preconditioner_scale_ = 0.5;
 
 Eigen::VectorXd ax;
 Eigen::VectorXd bx;
@@ -21343,7 +21480,6 @@ double* currH_bar);
 using vmecpp::vmec_algorithm_constants::kEvenParity;
 using vmecpp::vmec_algorithm_constants::kLambdaHighMDampingMaxPower;
 using vmecpp::vmec_algorithm_constants::kLambdaHighMDampingReferenceM;
-using vmecpp::vmec_algorithm_constants::kLambdaPreconditionerDampingFactor;
 using vmecpp::vmec_algorithm_constants::kLambdaPreconditionerZeroGuard;
 using vmecpp::vmec_algorithm_constants::kOddParity;
 
@@ -21657,8 +21793,10 @@ clmn_asym_o.setZero(nrztIncludingBoundary);
 }
 
 void IdealMhdModel::setFromINDATA(int ncurr, double adiabaticIndex,
-double tcon0, bool lforbal) {
+double tcon0, bool lforbal,
+double lambda_preconditioner_scale) {
 this->ncurr = ncurr;
+this->lambda_preconditioner_scale_ = lambda_preconditioner_scale;
 this->adiabaticIndex = adiabaticIndex;
 this->tcon0 = tcon0;
 
@@ -23085,8 +23223,8 @@ rru_fac[i] *= 0.5;
 
 void IdealMhdModel::updateLambdaPreconditioner() {
 
-const double pFactor = kLambdaPreconditionerDampingFactor /
-(4.0 * constants_.lamscale * constants_.lamscale);
+const double pFactor = lambda_preconditioner_scale_ /
+(constants_.lamscale * constants_.lamscale);
 
 for (int jH = r_.nsMinH; jH < r_.nsMaxH; ++jH) {
 bLambda[jH + 1 - r_.nsMinH] = 0.0;
@@ -25199,6 +25337,37 @@ if (vec.size() > 0) {
 return vec;
 } else {
 return VectorXd::Constant(1, val);
+}
+}
+
+void ExtrapolateFullGridEnds(int ns, VectorXd& m_profile) {
+if (ns < 4) {
+const double interior = m_profile[1];
+m_profile[0] = interior;
+m_profile[ns - 1] = interior;
+return;
+}
+
+const double axis = 2.0 * m_profile[1] - m_profile[2];
+const double boundary = 2.0 * m_profile[ns - 2] - m_profile[ns - 3];
+m_profile[0] = axis;
+m_profile[ns - 1] = boundary;
+}
+
+void ExtrapolateFullGridEnds(int ns, int n_znt, vmecpp::RowMatrixXd& m_field) {
+for (int kl = 0; kl < n_znt; ++kl) {
+if (ns < 4) {
+const double interior = m_field(1 * n_znt + kl);
+m_field(0 * n_znt + kl) = interior;
+m_field((ns - 1) * n_znt + kl) = interior;
+continue;
+}
+
+const double axis = 2.0 * m_field(1 * n_znt + kl) - m_field(2 * n_znt + kl);
+const double boundary =
+2.0 * m_field((ns - 2) * n_znt + kl) - m_field((ns - 3) * n_znt + kl);
+m_field(0 * n_znt + kl) = axis;
+m_field((ns - 1) * n_znt + kl) = boundary;
 }
 }
 
@@ -27782,21 +27951,7 @@ return covariant_b_derivatives;
 
 void vmecpp::ExtrapolateBSubS(const Sizes& s, const FlowControl& fc,
 BSubSFull& m_bsubs_full) {
-for (int kl = 0; kl < s.nZnT; ++kl) {
-
-const int index_0 = 0 * s.nZnT + kl;
-const int index_1 = 1 * s.nZnT + kl;
-const int index_2 = 2 * s.nZnT + kl;
-m_bsubs_full.bsubs_full(index_0) = 2.0 * m_bsubs_full.bsubs_full(index_1) -
-m_bsubs_full.bsubs_full(index_2);
-
-const int index_ns_1 = (fc.ns - 1) * s.nZnT + kl;
-const int index_ns_2 = (fc.ns - 2) * s.nZnT + kl;
-const int index_ns_3 = (fc.ns - 3) * s.nZnT + kl;
-m_bsubs_full.bsubs_full(index_ns_1) =
-2.0 * m_bsubs_full.bsubs_full(index_ns_2) -
-m_bsubs_full.bsubs_full(index_ns_3);
-}
+ExtrapolateFullGridEnds(fc.ns, s.nZnT, m_bsubs_full.bsubs_full);
 }
 
 vmecpp::JxBOutFileContents vmecpp::ComputeJxBOutputFileContents(
@@ -28064,36 +28219,12 @@ jxbout.bsubv3(target_index) = vmec_internal_results.bsubv(target_index);
 }
 }
 
-for (int kl = 0; kl < s.nZnT; ++kl) {
+ExtrapolateFullGridEnds(fc.ns, s.nZnT, jxbout.izeta);
+ExtrapolateFullGridEnds(fc.ns, jxbout.jdotb);
+ExtrapolateFullGridEnds(fc.ns, jxbout.bdotb);
+ExtrapolateFullGridEnds(fc.ns, jxbout.bdotgradv);
 
-const int index_0 = 0 * s.nZnT + kl;
-const int index_1 = 1 * s.nZnT + kl;
-const int index_2 = 2 * s.nZnT + kl;
-
-const int index_ns_1 = (fc.ns - 1) * s.nZnT + kl;
-const int index_ns_2 = (fc.ns - 2) * s.nZnT + kl;
-const int index_ns_3 = (fc.ns - 3) * s.nZnT + kl;
-
-jxbout.izeta(index_0) = 2.0 * jxbout.izeta(index_1) - jxbout.izeta(index_2);
-jxbout.izeta(index_ns_1) =
-2.0 * jxbout.izeta(index_ns_2) - jxbout.izeta(index_ns_3);
-}
-
-jxbout.jdotb[0] = 2.0 * jxbout.jdotb[1] - jxbout.jdotb[2];
-jxbout.jdotb[fc.ns - 1] =
-2.0 * jxbout.jdotb[fc.ns - 2] - jxbout.jdotb[fc.ns - 3];
-
-jxbout.bdotb[0] = 2.0 * jxbout.bdotb[1] - jxbout.bdotb[2];
-jxbout.bdotb[fc.ns - 1] =
-2.0 * jxbout.bdotb[fc.ns - 2] - jxbout.bdotb[fc.ns - 3];
-
-jxbout.bdotgradv[0] = 2.0 * jxbout.bdotgradv[1] - jxbout.bdotgradv[2];
-jxbout.bdotgradv[fc.ns - 1] =
-2.0 * jxbout.bdotgradv[fc.ns - 2] - jxbout.bdotgradv[fc.ns - 3];
-
-jxbout.pprim[0] = 2.0 * jxbout.pprim[1] - jxbout.pprim[2];
-jxbout.pprim[fc.ns - 1] =
-2.0 * jxbout.pprim[fc.ns - 2] - jxbout.pprim[fc.ns - 3];
+ExtrapolateFullGridEnds(fc.ns, jxbout.pprim);
 
 return jxbout;
 }
@@ -28307,7 +28438,7 @@ mercier.s[jF] = mercier_intermediate.s[jF];
 
 const double vp_full = (mercier_intermediate.vp_real[jHo] +
 mercier_intermediate.vp_real[jHi]) /
-2.0;
+2.0 * vmec_internal_results.sign_of_jacobian;
 if (vp_full == 0.0) {
 
 continue;
@@ -28553,40 +28684,11 @@ threed1_first_table_intermediate.bvcof[fc.ns - 1] =
 1.5 * threed1_first_table_intermediate.bvcoH[fc.ns - 2] -
 0.5 * threed1_first_table_intermediate.bvcoH[fc.ns - 3];
 
-threed1_first_table_intermediate.equif[0] =
-2.0 * threed1_first_table_intermediate.equif[1] -
-threed1_first_table_intermediate.equif[2];
-threed1_first_table_intermediate.equif[fc.ns - 1] =
-2.0 * threed1_first_table_intermediate.equif[fc.ns - 2] -
-threed1_first_table_intermediate.equif[fc.ns - 3];
-
-threed1_first_table_intermediate.jcurv[0] =
-2.0 * threed1_first_table_intermediate.jcurv[1] -
-threed1_first_table_intermediate.jcurv[2];
-threed1_first_table_intermediate.jcurv[fc.ns - 1] =
-2.0 * threed1_first_table_intermediate.jcurv[fc.ns - 2] -
-threed1_first_table_intermediate.jcurv[fc.ns - 3];
-
-threed1_first_table_intermediate.jcuru[0] =
-2.0 * threed1_first_table_intermediate.jcuru[1] -
-threed1_first_table_intermediate.jcuru[2];
-threed1_first_table_intermediate.jcuru[fc.ns - 1] =
-2.0 * threed1_first_table_intermediate.jcuru[fc.ns - 2] -
-threed1_first_table_intermediate.jcuru[fc.ns - 3];
-
-threed1_first_table_intermediate.presgrad[0] =
-2.0 * threed1_first_table_intermediate.presgrad[1] -
-threed1_first_table_intermediate.presgrad[2];
-threed1_first_table_intermediate.presgrad[fc.ns - 1] =
-2.0 * threed1_first_table_intermediate.presgrad[fc.ns - 2] -
-threed1_first_table_intermediate.presgrad[fc.ns - 3];
-
-threed1_first_table_intermediate.vpphi[0] =
-2.0 * threed1_first_table_intermediate.vpphi[1] -
-threed1_first_table_intermediate.vpphi[2];
-threed1_first_table_intermediate.vpphi[fc.ns - 1] =
-2.0 * threed1_first_table_intermediate.vpphi[fc.ns - 2] -
-threed1_first_table_intermediate.vpphi[fc.ns - 3];
+ExtrapolateFullGridEnds(fc.ns, threed1_first_table_intermediate.equif);
+ExtrapolateFullGridEnds(fc.ns, threed1_first_table_intermediate.jcurv);
+ExtrapolateFullGridEnds(fc.ns, threed1_first_table_intermediate.jcuru);
+ExtrapolateFullGridEnds(fc.ns, threed1_first_table_intermediate.presgrad);
+ExtrapolateFullGridEnds(fc.ns, threed1_first_table_intermediate.vpphi);
 
 return threed1_first_table_intermediate;
 }
@@ -31063,8 +31165,11 @@ return evalLineSegmentIntegrated(splineKnots, splineValues, normX);
 case ProfileParameterization::NICE_QUADRATIC:
 return evalNiceQuadratic(coeffs, normX);
 case ProfileParameterization::SUM_COSSQ_S:
+return evalSumCossqS(coeffs, normX);
 case ProfileParameterization::SUM_COSSQ_SQRTS:
+return evalSumCossqSqrts(coeffs, normX);
 case ProfileParameterization::SUM_COSSQ_S_FREE:
+return evalSumCossqSFree(coeffs, normX);
 default:
 std::cerr
 << absl::StrFormat(
@@ -31555,6 +31660,84 @@ return Coef(coeffs, 0) * (1.0 - x) + Coef(coeffs, 1) * x +
 4.0 * Coef(coeffs, 2) * x * (1.0 - x);
 }
 
+namespace {
+
+double CosSqHumpIntegral(double center, double half_width, double lower,
+double upper) {
+const auto primitive = [center, half_width](double t) {
+return 0.5 * (t - center) + half_width / (2.0 * M_PI) *
+std::sin(M_PI * (t - center) / half_width);
+};
+return primitive(upper) - primitive(lower);
+}
+}
+
+double RadialProfiles::evalSumCossqS(const Eigen::VectorXd& coeffs, double x) {
+const int num_humps = static_cast<int>(Coef(coeffs, 0));
+if (num_humps < 2) {
+return 0.0;
+}
+const double delta = 1.0 / (num_humps - 1);
+double current = 0.0;
+for (int i = 1; i <= num_humps; ++i) {
+const double center = (i - 1) * delta;
+const double lower = std::max(0.0, center - delta);
+const double upper = std::min(x, std::min(center + delta, 1.0));
+if (upper > lower) {
+current +=
+Coef(coeffs, i) * CosSqHumpIntegral(center, delta, lower, upper);
+}
+}
+return current;
+}
+
+double RadialProfiles::evalSumCossqSqrts(const Eigen::VectorXd& coeffs,
+double x) {
+const int num_humps = static_cast<int>(Coef(coeffs, 0));
+if (num_humps < 2) {
+return 0.0;
+}
+const double delta = 1.0 / (num_humps - 1);
+const double rho = std::sqrt(std::max(x, 0.0));
+double current = 0.0;
+for (int i = 1; i <= num_humps; ++i) {
+const double center = (i - 1) * delta;
+const double lower = std::max(0.0, center - delta);
+const double upper = std::min(rho, std::min(center + delta, 1.0));
+if (upper <= lower) {
+continue;
+}
+
+const auto primitive = [center, delta](double t) {
+const double angle = M_PI * (t - center) / delta;
+return 0.25 * t * t + delta * t / (2.0 * M_PI) * std::sin(angle) +
+delta * delta / (2.0 * M_PI * M_PI) * std::cos(angle);
+};
+current += Coef(coeffs, i) * (primitive(upper) - primitive(lower));
+}
+return current;
+}
+
+double RadialProfiles::evalSumCossqSFree(const Eigen::VectorXd& coeffs,
+double x) {
+double current = 0.0;
+for (int i = 0; i < 7; ++i) {
+const double amplitude = Coef(coeffs, 3 * i);
+const double center = Coef(coeffs, 3 * i + 1);
+const double half_width = Coef(coeffs, 3 * i + 2);
+if (amplitude == 0.0 || half_width <= 0.0) {
+continue;
+}
+const double lower = std::max(0.0, center - half_width);
+const double upper = std::min(x, std::min(center + half_width, 1.0));
+if (upper > lower) {
+current +=
+amplitude * CosSqHumpIntegral(center, half_width, lower, upper);
+}
+}
+return current;
+}
+
 void RadialProfiles::evalRadialProfiles(bool haveToFlipTheta,
 VmecConstants& m_vmecconst) {
 
@@ -31780,7 +31963,8 @@ const VmecINDATA& indata,
 std::optional<HotRestartState> initial_state = std::nullopt,
 std::optional<int> max_threads = std::nullopt,
 OutputMode verbose = OutputMode::kLegacy,
-InterruptCallback interrupt_callback = nullptr);
+InterruptCallback interrupt_callback = nullptr,
+bool always_fix_m1_gauge = false);
 
 absl::StatusOr<OutputQuantities> run(
 const VmecINDATA& indata,
@@ -31841,6 +32025,8 @@ void Printout(double delt0r, int thread_id, int iter2);
 absl::StatusOr<bool> UpdateForwardModel(VmecCheckpoint checkpoint,
 int maximum_iterations,
 int thread_id);
+
+absl::Status EvaluateFinalState();
 void PerformTimeStep(double fac, double b1, double time_step, int thread_id);
 void InterpolateToNextMultigridStep(
 int ns_new, int ns_old,
@@ -31892,6 +32078,8 @@ Boundaries b_;
 VmecConstants constants_;
 HandoverStorage h_;
 FlowControl fc_;
+
+bool always_fix_m1_gauge_ = false;
 MGridProvider mgrid_;
 OutputQuantities output_quantities_;
 
@@ -31932,6 +32120,10 @@ absl::StatusOr<SolveEqLoopStatus> SolveEquilibriumLoop(
 int thread_id, int maximum_iterations, VmecCheckpoint checkpoint,
 bool& m_lreset_internal, bool& m_liter_flag);
 
+absl::Status RecoverFromThreadErrors(
+const absl::Status& status_of_all_threads,
+bool all_errors_are_recoverable);
+
 bool verbose_;
 
 IterationLogger logger_;
@@ -31939,6 +32131,8 @@ IterationLogger logger_;
 InterruptCallback interrupt_callback_;
 
 bool interrupted_ = false;
+
+bool retry_from_three_surfaces_ = false;
 
 VacuumPressureState vacuum_pressure_state_;
 
@@ -32040,13 +32234,14 @@ return absl::OkStatus();
 absl::StatusOr<vmecpp::OutputQuantities> vmecpp::run(
 const VmecINDATA& indata, std::optional<HotRestartState> initial_state,
 std::optional<int> max_threads, OutputMode verbose,
-InterruptCallback interrupt_callback) {
+InterruptCallback interrupt_callback, bool always_fix_m1_gauge) {
 auto maybe_vmec = Vmec::FromIndata(indata, nullptr, max_threads, verbose,
 std::move(interrupt_callback));
 if (!maybe_vmec.ok()) {
 return maybe_vmec.status();
 }
 Vmec& v = **maybe_vmec;
+v.always_fix_m1_gauge_ = always_fix_m1_gauge;
 
 absl::StatusOr<bool> s =
 v.run(VmecCheckpoint::NONE, INT_MAX, 500, std::move(initial_state));
@@ -32094,6 +32289,13 @@ absl::Status is_indata_consistent =
 IsConsistent(indata,  false);
 if (!is_indata_consistent.ok()) {
 return is_indata_consistent;
+}
+
+if (max_threads.has_value() && *max_threads < 1) {
+return absl::InvalidArgumentError(absl::StrFormat(
+"The number of threads must be >= 1, but is %d. To use all available "
+"threads, leave max_threads unset.",
+*max_threads));
 }
 
 auto v = std::make_unique<Vmec>(indata, max_threads, verbose,
@@ -32275,8 +32477,8 @@ fc_.delbsq.reserve(cap);
 fc_.restart_reasons.reserve(cap);
 }
 
-logger_.BeginStage(igrid, max_grids + jacob_off_, fc_.nsval, s_.mnmax,
-fc_.ftolv, fc_.niterv, fc_.lfreeb);
+logger_.BeginStage(igrid + jacob_off_, max_grids + jacob_off_, fc_.nsval,
+s_.mnmax, fc_.ftolv, fc_.niterv, fc_.lfreeb);
 
 const bool is_checkpoint_step = igrid == checkpoint_multi_grid_step - 1;
 const absl::StatusOr<bool> initialized = InitializeRadial(
@@ -32297,6 +32499,10 @@ return reached_checkpoint;
 
 if (status_ != VmecStatus::NORMAL_TERMINATION &&
 status_ != VmecStatus::SUCCESSFUL_TERMINATION) {
+if (retry_from_three_surfaces_) {
+
+break;
+}
 if (!indata_.return_outputs_even_if_not_converged) {
 const auto msg = absl::StrFormat(
 "FATAL ERROR in SolveEquilibrium: %s\n"
@@ -32314,6 +32520,13 @@ std::cout << absl::StrFormat(
 "purposes.\n",
 VmecStatusAsString(status_));
 }
+giving_up = true;
+break;
+}
+
+if (indata_.lgiveup && (fc_.fsqr > fc_.ftolv * indata_.fgiveup ||
+fc_.fsqz > fc_.ftolv * indata_.fgiveup ||
+fc_.fsql > fc_.ftolv * indata_.fgiveup)) {
 giving_up = true;
 break;
 }
@@ -32341,6 +32554,13 @@ const auto msg = absl::StrFormat(
 VmecStatusAsString(status_), iter2_ - 1, fc_.niterv, fc_.nsval,
 fc_.ftolv, fc_.fsqr, fc_.fsqz, fc_.fsql);
 return absl::InternalError(msg);
+}
+
+if (status_ == VmecStatus::NORMAL_TERMINATION) {
+absl::Status evaluated = EvaluateFinalState();
+if (!evaluated.ok()) {
+return evaluated;
+}
 }
 
 if (!h_.vacuum_status.ok()) {
@@ -32526,7 +32746,8 @@ ls_[thread_id].get(), &h_, r_[thread_id].get(), &fb_vac_,
 vac_num_threads_, indata_.signgs, indata_.nvacskip,
 &vacuum_pressure_state_);
 m_[thread_id]->setFromINDATA(indata_.ncurr, indata_.gamma, indata_.tcon0,
-indata_.lforbal);
+indata_.lforbal,
+indata_.lambda_preconditioner_scale);
 }
 
 absl::Status current_profile_status =
@@ -32621,6 +32842,13 @@ return true;
 }
 }
 
+if (always_fix_m1_gauge_) {
+for (int thread_id = 0; thread_id < num_threads_; ++thread_id) {
+decomposed_x_[thread_id]->setM1GaugeFromBoundary(t_, b_,
+*p_[thread_id]);
+}
+}
+
 for (int thread_id = 0; thread_id < num_threads_; ++thread_id) {
 fc_.restart_reason = RestartReason::NO_RESTART;
 
@@ -32643,6 +32871,8 @@ bool any_checkpoint_reached = false;
 bool all_errors_are_recoverable = true;
 
 bool liter_flag = true;
+
+retry_from_three_surfaces_ = false;
 
 #ifdef _OPENMP
 #pragma omp parallel num_threads(num_threads_)
@@ -32697,8 +32927,29 @@ return absl::CancelledError("Run interrupted by user");
 }
 
 if (!status_of_all_threads.ok()) {
-if (indata_.return_outputs_even_if_not_converged &&
-all_errors_are_recoverable) {
+absl::Status unrecovered = RecoverFromThreadErrors(
+status_of_all_threads, all_errors_are_recoverable);
+if (!unrecovered.ok()) {
+return unrecovered;
+}
+return false;
+}
+
+if (!any_checkpoint_reached) {
+
+logger_.EndStage(h_.mhdEnergy * 4.0 * M_PI * M_PI);
+}
+
+return any_checkpoint_reached;
+}
+
+absl::Status Vmec::RecoverFromThreadErrors(
+const absl::Status& status_of_all_threads,
+bool all_errors_are_recoverable) {
+if (!indata_.return_outputs_even_if_not_converged ||
+!all_errors_are_recoverable) {
+return status_of_all_threads;
+}
 
 if (verbose_) {
 std::cout << absl::StrFormat(
@@ -32709,17 +32960,7 @@ std::cout << absl::StrFormat(
 status_of_all_threads.message());
 }
 status_ = VmecStatus::UNRECOVERABLE_ERROR;
-return false;
-}
-return status_of_all_threads;
-}
-
-if (!any_checkpoint_reached) {
-
-logger_.EndStage(h_.mhdEnergy * 4.0 * M_PI * M_PI);
-}
-
-return any_checkpoint_reached;
+return absl::OkStatus();
 }
 
 absl::StatusOr<Vmec::SolveEqLoopStatus> Vmec::SolveEquilibriumLoop(
@@ -32804,13 +33045,23 @@ return SolveEqLoopStatus::MUST_RETRY;
 } else if (status_ != VmecStatus::NORMAL_TERMINATION &&
 status_ != VmecStatus::SUCCESSFUL_TERMINATION) {
 
-if (!indata_.return_outputs_even_if_not_converged) {
+const bool retry_from_three_surfaces =
+status_ == VmecStatus::BAD_JACOBIAN && jacob_off_ == 0;
+if (!indata_.return_outputs_even_if_not_converged &&
+!retry_from_three_surfaces) {
 const auto msg = absl::StrFormat(
 "FATAL ERROR in thread=%d. The solver failed during the first "
 "iterations. This may happen if the initial boundary is poorly "
 "shaped or if it isn't spectrally condensed enough.",
 thread_id);
 return absl::UnknownError(msg);
+}
+
+if (retry_from_three_surfaces) {
+#ifdef _OPENMP
+#pragma omp atomic write
+#endif
+retry_from_three_surfaces_ = true;
 }
 
 return SolveEqLoopStatus::NORMAL_TERMINATION;
@@ -33193,7 +33444,8 @@ absl::StatusOr<bool> reached_checkpoint = m_[thread_id]->update(
 *decomposed_x_[thread_id], *physical_x_[thread_id],
 *decomposed_f_[thread_id], *physical_f_[thread_id], need_restart,
 last_preconditioner_update_, last_full_update_nestor_, fc_, iter1_,
-iter2_, checkpoint, iterations_before_checkpointing, verbose_);
+iter2_, checkpoint, iterations_before_checkpointing, verbose_,
+always_fix_m1_gauge_);
 if (!reached_checkpoint.ok()) {
 return reached_checkpoint;
 }
@@ -33214,6 +33466,57 @@ fc_.restart_reason = RestartReason::NO_RESTART;
 #endif
 
 return reached_checkpoint;
+}
+
+absl::Status Vmec::EvaluateFinalState() {
+
+fc_.restart_reason = RestartReason::NO_RESTART;
+
+absl::Status status_of_all_threads = absl::OkStatus();
+bool all_errors_are_recoverable = true;
+
+bool vacuum_pressure_switched_on = false;
+
+#ifdef _OPENMP
+#pragma omp parallel num_threads(num_threads_)
+#endif
+{
+#ifdef _OPENMP
+const int thread_id = omp_get_thread_num();
+#else
+const int thread_id = 0;
+#endif
+
+bool need_restart = false;
+const absl::StatusOr<bool> evaluated = m_[thread_id]->update(
+*decomposed_x_[thread_id], *physical_x_[thread_id],
+*decomposed_f_[thread_id], *physical_f_[thread_id], need_restart,
+last_preconditioner_update_, last_full_update_nestor_, fc_, iter1_,
+iter2_, VmecCheckpoint::NONE, INT_MAX, verbose_);
+
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+{
+vacuum_pressure_switched_on = vacuum_pressure_switched_on || need_restart;
+if (!evaluated.ok()) {
+all_errors_are_recoverable &= (evaluated.status().code() ==
+absl::StatusCode::kFailedPrecondition);
+UpdateStatusForThread(status_of_all_threads, thread_id,
+evaluated.status());
+}
+}
+}
+
+if (!status_of_all_threads.ok()) {
+return RecoverFromThreadErrors(status_of_all_threads,
+all_errors_are_recoverable);
+}
+if (fc_.restart_reason == RestartReason::BAD_JACOBIAN &&
+!vacuum_pressure_switched_on) {
+status_ = VmecStatus::BAD_JACOBIAN;
+}
+return absl::OkStatus();
 }
 
 void Vmec::PerformTimeStep(double fac, double b1, double time_step,
@@ -33743,6 +34046,7 @@ lamscale = 0.;
 #include <iostream>
 #include <string>
 
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/strip.h"
 
@@ -33773,7 +34077,14 @@ return 1;
 
 std::optional<int> max_threads = std::nullopt;
 if (argc == 3) {
-max_threads = std::atoi(argv[2]);
+int parsed_max_threads = 0;
+if (!absl::SimpleAtoi(argv[2], &parsed_max_threads) ||
+parsed_max_threads < 1) {
+std::cerr << "n_max_threads must be a positive integer, but is '"
+<< argv[2] << "'\n";
+return 1;
+}
+max_threads = parsed_max_threads;
 }
 
 const absl::StatusOr<OutputQuantities> out =
