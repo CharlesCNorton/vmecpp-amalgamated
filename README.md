@@ -11,15 +11,15 @@ around 30% fewer tokens, for reading the whole solver in one pass under a contex
 budget. It keeps the `// source:` and `// header:` markers, so any region maps
 back to the commented layer for the prose on that routine.
 
-`vmecpp_unmerged_prs.txt` holds every open VMEC++ pull request and every one
-opened since 2026-04-25 and closed without merging, each with its title,
-description and conversation, meaning the comments, review verdicts and inline
-review comments of its human participants. The diffs are left out, and each
-code block in a post is replaced by a marker line. Read with the amalgamation,
-it gives the current code together with everything proposed against it and not
-merged: fixes already waiting in open pull requests, and approaches tried and
-abandoned. The changes of merged pull requests are in the amalgamation itself,
-and those pull requests are not listed.
+`vmecpp_unmerged_prs.txt` holds the VMEC++ pull requests that change its C++
+core, every open one and every one opened since 2026-04-25 and closed without
+merging, each with its title, description and conversation, meaning the
+comments, review verdicts and inline review comments of its human participants.
+The diffs are left out, and each code block in a post is replaced by a marker
+line. Read with the amalgamation, it gives the current code together with
+everything proposed against it and not merged: fixes already waiting in open
+pull requests, and approaches tried and abandoned. The changes of merged pull
+requests are in the amalgamation itself, and those pull requests are not listed.
 
 This is an unofficial redistribution and is not affiliated with or endorsed by
 Proxima Fusion.
@@ -104,8 +104,13 @@ together, and the trailing backslash of a macro continuation is kept.
 
 `--prs-out` writes the pull request digest from the GitHub API at the time of
 the run, so every regeneration of the amalgamation refreshes it. It needs a
-token from `GITHUB_TOKEN` or `GH_TOKEN`, or a logged-in `gh`. Closed pull
-requests opened before `--prs-cutoff` (default `2026-04-25`) are left out.
+token from `GITHUB_TOKEN` or `GH_TOKEN`, or a logged-in `gh`. A pull request is
+listed when it changes the C++ core, meaning a file under `src/vmecpp/cpp/`, its
+tests and test data included, other than the pybind11 bindings, or the top-level
+`CMakeLists.txt` that pins the dependencies; Python, documentation, example,
+benchmark and CI changes fall outside it, and a pull request for which GitHub
+lists no changed files is kept. Closed pull requests opened before
+`--prs-cutoff` (default `2026-04-25`) are left out.
 Comments and reviews from bot accounts are dropped, and so are Graphite stack
 notices; a pull request a bot opened keeps its description. The remaining posts
 are kept as GitHub displays them, except that each fenced or indented code

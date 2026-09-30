@@ -16,12 +16,13 @@ replaced by a single notice, for reading the whole repository in one pass under 
 token budget. The source/header markers are kept so a region maps back to the
 commented layer.
 
---prs-out additionally writes a digest of the VMEC++ pull requests that are
-open, or were opened on or after --prs-cutoff and closed without merging, read
-from the GitHub API at the time of the run: title, description and the
-conversation less bot posts, without diffs, and with each code block in a post
-replaced by a marker line. It needs a token in GITHUB_TOKEN or GH_TOKEN, or a
-logged-in gh.
+--prs-out additionally writes a digest of the VMEC++ pull requests that change
+the C++ core (a file under src/vmecpp/cpp/ other than the pybind11 bindings, or
+the top-level CMakeLists.txt) and are open, or were opened on or after
+--prs-cutoff and closed without merging, read from the GitHub API at the time
+of the run: title, description and the conversation less bot posts, without
+diffs, and with each code block in a post replaced by a marker line. It needs a
+token in GITHUB_TOKEN or GH_TOKEN, or a logged-in gh.
 
 Usage:
   python amalgamate.py \
@@ -71,6 +72,8 @@ LIST_ITEM_RE = re.compile(r"[ \t]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
 CODE_MARK = "[code omitted]"
 SUGGESTION_MARK = "[suggested change omitted]"
 CPP_PREFIX = "src/vmecpp/cpp/"
+PYBIND_DIR = "/pybind11/"
+PINS_FILE = "CMakeLists.txt"
 
 # Library TUs relative to the cpp root, mirroring the vmecpp_sources list in
 # upstream's CMakeLists; vmec_standalone (the sole main()) last.
@@ -323,6 +326,17 @@ def is_bot(post):
     return (post.get("user") or {}).get("type") == "Bot"
 
 
+def changes_core(paths):
+    """Whether a pull request that changes these paths changes the C++ core: a
+    file under src/vmecpp/cpp/, its tests and test data included, other than
+    the pybind11 bindings, or the top-level CMakeLists.txt that pins the
+    dependencies. A pull request for which GitHub lists no changed files counts
+    as changing it."""
+    return not paths or any(
+        (p.startswith(CPP_PREFIX) and PYBIND_DIR not in p) or p == PINS_FILE
+        for p in paths)
+
+
 def image_mark(alt):
     """An image as the text that stands in for it: its alt text, unless that is
     empty or GitHub's default, image, with or without a file extension."""
@@ -488,6 +502,16 @@ def write_pr_digest(path, repo, token, prov, cutoff):
     prs = [p for p in github_all(f"/repos/{repo}/pulls?state=all", token)
            if p["state"] == "open"
            or (p["merged_at"] is None and p["created_at"][:10] >= cutoff)]
+
+    def in_core(p):
+        files = github_all(f"/repos/{repo}/pulls/{p['number']}/files", token)
+        names = [(f["filename"], f.get("previous_filename")) for f in files]
+        return changes_core([n for pair in names for n in pair if n])
+
+    with ThreadPoolExecutor(6) as ex:
+        core = list(ex.map(in_core, prs))
+    n_outside = core.count(False)
+    prs = [p for p, keep in zip(prs, core) if keep]
     prs.sort(key=lambda p: (p["state"] != "open", p["number"]))
 
     def fetch(p):
@@ -506,12 +530,16 @@ def write_pr_digest(path, repo, token, prov, cutoff):
         return s.replace(" ", "\0")
 
     header = (
-        f"VMEC++ pull requests from github.com/{repo} that are open, or were "
-        f"opened on or after {cutoff} and closed without merging, taken "
-        f"{nobreak(taken)}: {n_open} open, {len(prs) - n_open} closed. The "
-        f"amalgamation beside this file is built from {prov}; the changes of "
-        f"merged pull requests are in it, and those pull requests are not "
-        f"listed here.",
+        f"VMEC++ pull requests from github.com/{repo} that change its C++ core "
+        f"and are open, or were opened on or after {cutoff} and closed without "
+        f"merging, taken {nobreak(taken)}: {n_open} open, "
+        f"{len(prs) - n_open} closed. A pull request changes the C++ core when "
+        f"it changes a file under {CPP_PREFIX}, its tests and test data "
+        f"included, other than the pybind11 bindings, or the top-level "
+        f"{PINS_FILE} that pins the dependencies; one for which GitHub lists "
+        f"no changed files is listed as well. The amalgamation beside this "
+        f"file is built from {prov}; the changes of merged pull requests are "
+        f"in it, and those pull requests are not listed here.",
         f"Each entry gives the pull request's title and state, then its "
         f"description and its conversation in time order: comments, review "
         f"verdicts and summaries, and inline review comments grouped by thread "
@@ -530,7 +558,7 @@ def write_pr_digest(path, repo, token, prov, cutoff):
                          for p in header).replace("\0", " ")
     path.write_text(header + "\n\n\n" + "\n".join(rendered), encoding="utf-8",
                     newline="\n")
-    return n_open, len(prs) - n_open
+    return n_open, len(prs) - n_open, n_outside
 
 
 def main():
@@ -690,8 +718,9 @@ def main():
                                 encoding="utf-8")
 
     if args.prs_out:
-        n_open, n_closed = write_pr_digest(args.prs_out, args.prs_repo, token,
-                                           prov, args.prs_cutoff.isoformat())
+        n_open, n_closed, n_outside = write_pr_digest(
+            args.prs_out, args.prs_repo, token, prov,
+            args.prs_cutoff.isoformat())
 
     n_lines = (banner + body).count("\n") + 1
     print(f"wrote {args.out}")
@@ -709,6 +738,7 @@ def main():
     if args.prs_out:
         print(f"  PR digest                : {args.prs_out}")
         print(f"    open / closed unmerged : {n_open} / {n_closed}")
+        print(f"    outside the C++ core   : {n_outside}")
         print(f"    size                   : {args.prs_out.stat().st_size / 1024:.0f} KiB")
     if unresolved:
         print(f"  UNRESOLVED includes ({len(unresolved)}):")
