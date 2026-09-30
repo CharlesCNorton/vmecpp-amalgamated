@@ -13,7 +13,7 @@
 
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![MIT license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/proximafusion/vmecpp/blob/d358bbd4e73cbdb75f540f40ee67ea4d4e32a0db/LICENSE.txt)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue)](https://github.com/proximafusion/vmecpp/blob/860df56938ea6aaf7a1775c89d51069bab4120b3/LICENSE.txt)
 ![Python version](https://img.shields.io/badge/python-3.10-blue)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14800158.svg)](https://doi.org/10.5281/zenodo.14800158)
 
@@ -76,7 +76,7 @@ If unsure where to start, we suggest giving the [`w7x`](https://github.com/proxi
 
 For example [`examples/force_residual_convergence.py`](https://github.com/proximafusion/vmecpp/blob/main/examples/force_residual_convergence.py) runs fixed-boundary VMEC++ on the W7-X case and plots the convergence of the force residuals.
 <!-- SPHINX-END1 -->
-![W7-X force residual convergence](https://github.com/proximafusion/vmecpp/raw/d358bbd4e73cbdb75f540f40ee67ea4d4e32a0db/docs/w7x_force_convergence.png)
+![W7-X force residual convergence](https://github.com/proximafusion/vmecpp/raw/860df56938ea6aaf7a1775c89d51069bab4120b3/docs/w7x_force_convergence.png)
 <!-- SPHINX-START2 -->
 
 ### As a Python package
@@ -100,6 +100,10 @@ vmec_output.wout.save("wout_w7x.nc")
 ```
 
 All other output files are accessible via members of the `vmec_output` object called `threed1_volumetrics`, `jxbout` and `mercier`.
+
+An optional `iteration_callback` is available to investigate the progress of the solver. It can be used to interactively debug
+and interact with `vmecpp`'s state from a Python repl, or generate animations of the convergence progress like in
+[`examples/watch_solve.py`](https://github.com/proximafusion/vmecpp/blob/main/examples/watch_solve.py).
 
 ### With SIMSOPT
 
@@ -305,14 +309,14 @@ hot_restarted_output = vmecpp.run(vmec_input, restart_from=vmec_output)
 > The autodiff API is not yet stable. We are planning to make autodiff the default
 > behaviour and to release a suitable pip wheel in the upcoming weeks.
 
-The `wout` quantities support autodiff with JAX. `jax.grad` can objectives written
+The `wout` quantities support autodiff with JAX. `jax.grad` can differentiate objectives written
 in terms of `wout` quantities with respect to the boundary coefficients `rbc`, `zbs`.
 When they are JAX tracers, `vmecpp.run` solves through the implicit adjoint of the
 force residual, which needs a build with `-DVMECPP_ENABLE_ENZYME=ON`.
 Otherwise it returns NumPy arrays as before.
 
 Leaves that change shape depending on iteration progress (`fsqt` trace for example)
-are treated as aux data to support differentiability. jxbout, Mercier and threed1
+are treated as aux data to support differentiability. `jxbout`, `mercier` and `threed1`
 tables are also treated as non-differentiable aux data. Under `jax.jit` these tables
 and diagnostics are `None`.
 

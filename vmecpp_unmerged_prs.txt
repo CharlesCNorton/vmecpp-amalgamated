@@ -1,11 +1,11 @@
 VMEC++ pull requests from github.com/proximafusion/vmecpp that change its C++
 core and are open, or were opened on or after 2026-04-25 and closed without
-merging, taken 2026-09-30 03:22 UTC: 26 open, 45 closed. A pull request changes
+merging, taken 2026-09-30 16:15 UTC: 26 open, 45 closed. A pull request changes
 the C++ core when it changes a file under src/vmecpp/cpp/, its tests and test
 data included, other than the pybind11 bindings, or the top-level CMakeLists.txt
 that pins the dependencies; one for which GitHub lists no changed files is
 listed as well. The amalgamation beside this file is built from
-github.com/proximafusion/vmecpp v0.7.5-56-gd358bbd4; the changes of merged pull
+github.com/proximafusion/vmecpp v0.7.5-71-g860df569; the changes of merged pull
 requests are in it, and those pull requests are not listed here.
 
 Each entry gives the pull request's title and state, then its description and
@@ -893,54 +893,6 @@ Notable: `quasr_65579` -915 iterations (-27.2%), `up_down_asym` -105 iterations 
 `adaptive_preconditioner_update` defaults to `false`. Execution is bit-identical to current code when `false`. No configuration in the 21-case benchmark regresses in iteration count.
 
 
-=== PR #839 [OPEN] Hand every force iteration to a callback and watch a solve converge ===
-
---- description by CharlesCNorton, 2026-09-09 00:05 UTC ---
-**Change** - `vmecpp.run` takes an `iteration_callback`, called once per force iteration with an `IterationSnapshot`: the iteration and multigrid stage, `ns`, the invariant residuals and `ftol`, the time step, the restart reason, the Jacobian resets, whether the vacuum pressure is in the force balance, the MHD energy, and the geometry of the state. The C++ loop calls it from the master thread between two barriers, so it covers every run of `vmecpp.run`, free boundary included. Returning `False` stops the run, which returns the state reached with `ier_flag = 2`, VMEC 8.52's `more_iter_flag`, added as `VmecStatus::MORE_ITERATIONS_NEEDED`. An exception raised in the callback propagates.
-
-`examples/watch_solve.py` uses the callback to draw the flux surfaces above the force residuals while the solve runs, in a window or into a `.gif` or video file. Closing the window stops the solve.
-
-**Cause** - the state of an iteration was reachable only through the Python-driven loop of `vmecpp.solve_equilibrium`, which is single-threaded and does not run free-boundary cases.
-
-**Evidence** - recorded with the example:
-
-[image: Solov'ev]
-
-[image: CTH-like, free boundary]
-
-[image: W7-X]
-
-**Tests** - `IterationCallbackSeesEveryIterationAndCanStop` in `vmec_test`: one snapshot per recorded residual, bit-identical, one converged snapshot per stage whose geometry equals the output's, and a stop at iteration 20 with `ier_flag` 2. `tests/test_iteration_callback.py`: the same through Python on solovev and the symmetric and asymmetric CTH cases, a propagating exception, the drawn cross-sections against `vmecpp.geometry.evaluate` to 1e-12, the frames of a recorded solve, and a stop when the window closes.
-
-**Scope** - without a callback nothing changes: no barrier is added and the outputs are the ones the existing tests compare. The viewer is an example, so matplotlib stays out of the package's dependencies.
-
---- comment by CharlesCNorton, 2026-09-22 18:03 UTC ---
-enhancing
-
---- inline thread on src/vmecpp/__init__.py:2470-2482 (outdated) ---
-> jurasic-pf, 2026-09-29 08:53 UTC:
-Can we make this a Python object (dataclass, or BaseModelWithNumpy)?
-
-For Python users, it's hard to understand how to interact with an opaque object handed from the C++ backend. That's the reason why we have all the parallel objects implemented python side in the first place.
-
---- review by jurasic-pf, 2026-09-29 08:57 UTC: APPROVED ---
-I really like this change. Minor comments
-
---- inline thread on vmecpp/vmec/vmec/vmec.cc:1528 (outdated) ---
-> jurasic-pf, 2026-09-29 08:59 UTC:
-EquilibriumState
-
---- inline thread on vmecpp/vmec/vmec/vmec.h:69 (outdated) ---
-> jurasic-pf, 2026-09-29 08:59 UTC:
-SolverState
-
---- inline thread on src/vmecpp/__init__.py:2470 (outdated) ---
-> jurasic-pf, 2026-09-29 08:59 UTC:
-SolverState
-
---- review by jurasic-pf, 2026-09-29 21:18 UTC: APPROVED ---
-
-
 === PR #843 [OPEN] Add a geometry tolerance that holds a run until the flux surfaces stop moving ===
 
 --- description by CharlesCNorton, 2026-09-09 13:47 UTC ---
@@ -974,6 +926,41 @@ Ten microns of surface motion is a stricter statement about the equilibrium than
 
 --- comment by jurasic-pf, 2026-09-29 22:18 UTC ---
 Bit diagnosis of the issue, I think the fact that the axis keeps moving, even the force balance is so small indicates that we are preconditioning a way that dampens away physically meaningful terms. If its possible to imrpove things on the force balance side to address the same issue i would prefer that, otherwhise we can talk about this.
+
+--- comment by CharlesCNorton, 2026-09-30 15:33 UTC ---
+The part a run at ftol 1e-8 leaves unconverged is lambda at m = 1, n = 0 near the axis moving together with the axis itself: each alone is preconditioned fine, but the preconditioner treats R, Z and lambda separately, so the combination converges about a thousand times slower. I will couple them in the preconditioner in place of the geometry tolerance.
+
+
+=== PR #877 [OPEN, draft] Put the half-grid fields and the enclosed current on SolverState ===
+
+--- description by CharlesCNorton, 2026-09-22 17:50 UTC ---
+**Change** - `SolverState`, which `vmecpp.run` hands to `iteration_callback` on every force iteration, carries two new fields. `half_grid` is a `vmecpp.HalfGridFields` with the fields of the force evaluation on the half grid, gathered from all threads: `sqrt(g)`, `B^theta`, `B^zeta`, `B_theta` and `B_zeta` on the solver's angular grid with its averaging weights, and the profiles `buco`, `bvco`, `iota`, `phip` and `vp`. With `ncurr = 1`, `curr_h` is the enclosed toroidal current that the force evaluations prescribe on the half grid, in the units of `buco`, and every evaluation solves for chi' so that `buco` equals it. The callback may change its values in place, and the solver prescribes the changed current from the next iteration to the end of the multigrid step. `curr_h` is empty with `ncurr = 0`, and a callback that leaves it at another length stops the run with a `ValueError`. In C++, `IterationCallback` takes `SolverState&`, and the master thread writes a changed `curr_h` into every thread's `currH` while the other threads wait at the barrier.
+
+`examples/self_consistent_bootstrap_current.py` uses this for SIMSOPT's Redl closure on the quasi-helical warm start. On the final multigrid step, the callback moves `state.curr_h` halfway to the Redl current of `state.half_grid` every 25 iterations. When the forces converge while the closure still changes the current by more than 1e-3 of its maximum, the final step is hot-restarted from that equilibrium with the relaxed current as a `line_segment_i` profile.
+
+**Cause** - a closure for the current profile needs the iterating field and a way to set the current between iterations. The review of #876 asked for both through the callback or the Python API, with the closure kept outside the solver, and the state object of #839's iteration callback carries them.
+
+**Evidence** - the quasi-helical warm start at ns = 50, with n_e = 1e19 (1 - s^5) m^-3, T_e = T_i = 4 (1 - s) keV and a volume-averaged beta of 2%, gives:
+
+| run | net current | iota mid | iota edge | Redl mismatch |
+|---|---|---|---|---|
+| zero current | 0 A | -1.0609 | -1.1187 | 1.00 |
+| closure through the callback | -11672 A | -1.0016 | -1.0089 | 2.0e-3 |
+
+The mismatch is the measure of SIMSOPT's `VmecRedlBootstrapMismatch`, recomputed from the wout spectrum of a separate solve that uses the final current profile. It falls as the radial grid is refined, from 1.6e-2 at ns = 16 to 7.1e-3 at 25 and 2.0e-3 at 50, and the closure takes 1762 force iterations on the final grid.
+
+**Tests** - `test_half_grid_fields.py` checks, on a symmetric and an asymmetric case and at every iteration, that `buco` and `bvco` are the averages of `B_theta` and `B_zeta`, that `vp` is `signgs` times the average of `sqrt(g)` and that `iota phi'` is `chi' = <sqrt(g) B^theta>`. It checks that the fields of the converged iteration equal the wout, that every evaluation gives `buco = curr_h`, that a profile the callback writes into `curr_h` is the one the following evaluations prescribe, that `curr_h` is empty with `ncurr = 0`, and that the example's reflection onto the full poloidal grid is correct. `test_self_consistent_bootstrap_current.py` runs the example at ns = 16 and 25, checks that the equilibrium it converges to carries the current the closure left, and checks that current against SIMSOPT's mismatch measure. Both fail on main, whose `SolverState` has neither field.
+
+**Scope** - the changes to VMEC++ are the two `SolverState` fields and the write-back of `curr_h`, and the closure and its iteration are in the example. A C++ callback that takes `const SolverState&` still converts to `IterationCallback`.
+
+--- comment by jurasic-pf, 2026-09-29 09:21 UTC ---
+This is pending merge and finalization of https://github.com/proximafusion/vmecpp/pull/839
+
+--- comment by jurasic-pf, 2026-09-29 22:05 UTC ---
+Can you adapt this PR to build on the iteration state object thats been introduced?
+
+--- comment by CharlesCNorton, 2026-09-30 13:33 UTC ---
+The half-grid fields and the enclosed current are now `SolverState.half_grid` and `SolverState.curr_h`, and the example drives the closure through the `iteration_callback` of `vmecpp.run`, changing `state.curr_h` in place. `VmecModel` is unchanged.
 
 
 === PR #878 [OPEN] Shorten time steps that would make flux surfaces cross ===
@@ -1047,6 +1034,9 @@ What implications does this have on the step size we can choose? Typically, it i
 @jurasic-pf It's fraction-to-the-boundary on the Jacobian: a step that would take tau below 1% of its starting value is cut to the largest fraction that doesn't (closed form, since tau is quadratic along the step).
 
 Reran on all three shards (the description was shard 0 only): 12 of 24 `JACOBIAN_75_TIMES_BAD` failures converge (9/11, 3/3, 0/10 by shard). The rest fail on residual blow-ups, which the flag doesn't address. 0.1% gives identical results; 10% trades one extra rescue for four iteration-limit runs. Shortened steps are now logged as `RestartReason.SHORTENED_STEP` (ccb50b61). Updating description.
+
+--- review by jurasic-pf, 2026-09-30 07:26 UTC: APPROVED ---
+This seems like a great idea
 
 
 === PR #897 [OPEN] Size the OpenMP teams to the threads the runtime grants ===
