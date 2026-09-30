@@ -21,6 +21,16 @@ everything proposed against it and not merged: fixes already waiting in open
 pull requests, and approaches tried and abandoned. The changes of merged pull
 requests are in the amalgamation itself, and those pull requests are not listed.
 
+`upstream/` holds VMEC++'s own `README.md` and its agent guides, the
+`AGENTS.md` files with the `CLAUDE.md` links to them, together with the two
+documents the guides make required reading, `VMECPP_NAMING_GUIDE.md` and
+`docs/fourier_basis_implementation.md`. They are copied from the commit the
+amalgamation is built from and kept at their paths in the VMEC++ repository, so
+the guides' references to one another and to those two documents resolve at the
+paths they give. Their paths and commands refer to that repository; a file under
+`src/vmecpp/cpp/` appears in the amalgamation's markers under its path relative
+to that directory.
+
 This is an unofficial redistribution and is not affiliated with or endorsed by
 Proxima Fusion.
 
@@ -94,7 +104,8 @@ python amalgamate.py \
     --abscab-root abscab-cpp \
     --out vmecpp_amalgamated.cc \
     --min-out vmecpp_amalgamated.min.cc \
-    --prs-out vmecpp_unmerged_prs.txt
+    --prs-out vmecpp_unmerged_prs.txt \
+    --docs-out upstream
 ```
 
 `--min-out` writes the stripped layer from the same assembled text. Its comment
@@ -119,6 +130,17 @@ review suggestion, HTML comments and `Co-authored-by` and `Generated with
 Claude Code` trailer lines are removed, and an image is given as its alt text.
 Paths under `src/vmecpp/cpp/` are given relative to it, as the amalgamation's
 markers give them.
+
+`--docs-out` copies the checkout's top-level `README.md`,
+`VMECPP_NAMING_GUIDE.md` and `docs/fourier_basis_implementation.md`, and every
+`AGENTS.md` and `CLAUDE.md` it tracks, into the given directory at their paths
+in the checkout, replacing what an earlier run wrote there. It stops before
+writing anything when the checkout lacks one of the three named files or the
+directory holds any file other than earlier copies. A symbolic link is copied as
+a link, or as a plain file holding its target where the repository holding the
+directory has `core.symlinks` off. A relative link in a copied document that
+names a file outside the copies is rewritten to that file on GitHub at the
+checkout's commit.
 
 ## Verification
 

@@ -24,13 +24,21 @@ of the run: title, description and the conversation less bot posts, without
 diffs, and with each code block in a post replaced by a marker line. It needs a
 token in GITHUB_TOKEN or GH_TOKEN, or a logged-in gh.
 
+--docs-out additionally copies the checkout's top-level README.md,
+VMECPP_NAMING_GUIDE.md and docs/fourier_basis_implementation.md, and every
+AGENTS.md and CLAUDE.md it tracks, into the given directory at their paths in
+the checkout, symbolic links as links or, where core.symlinks is off, as plain
+files holding the target, with each relative link to a file not copied pointed
+at that file on GitHub at the checkout's commit.
+
 Usage:
   python amalgamate.py \
       --cpp-root   path/to/vmecpp/src/vmecpp/cpp \
       --abscab-root path/to/abscab-cpp \
       --out        vmecpp_amalgamated.cc \
       --min-out    vmecpp_amalgamated.min.cc \
-      --prs-out    vmecpp_unmerged_prs.txt
+      --prs-out    vmecpp_unmerged_prs.txt \
+      --docs-out   upstream
 
 --abscab-root must contain abscab/abscab.hh and abscab/abscab.cc. Get the
 sources VMEC++ pins with:
@@ -43,7 +51,9 @@ import argparse
 import http.client
 import json
 import os
+import posixpath
 import re
+import shutil
 import subprocess
 import textwrap
 import time
@@ -56,6 +66,7 @@ from pathlib import Path
 INC_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*([<"])([^>"]+)[>"]')
 MARKER_RE = re.compile(r'^//\s*(?:source|header):\s*\S+$')
 
+UPSTREAM = "proximafusion/vmecpp"
 GITHUB_API = "https://api.github.com"
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 GRAPHITE_NOTICE = "This stack of pull requests is managed by"
@@ -74,6 +85,17 @@ SUGGESTION_MARK = "[suggested change omitted]"
 CPP_PREFIX = "src/vmecpp/cpp/"
 PYBIND_DIR = "/pybind11/"
 PINS_FILE = "CMakeLists.txt"
+DOC_FILES = ("README.md", "VMECPP_NAMING_GUIDE.md",
+             "docs/fourier_basis_implementation.md")
+DOC_GUIDES = ("AGENTS.md", "CLAUDE.md")
+DOC_PATHSPECS = (*DOC_FILES, *(f":(glob)**/{name}" for name in DOC_GUIDES))
+DOC_NAMES = (*(posixpath.basename(p) for p in DOC_FILES), *DOC_GUIDES)
+DOC_FENCE_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
+DOC_REF_RE = re.compile(
+    r"(?P<code>(`+).*?(?<!`)\2(?!`))"
+    r"|(?P<lead>\]\([ \t]*<?|\b(?:src|href)[ \t]*=[ \t]*[\"'])"
+    r"(?P<target>[^\s()<>\"']+)", re.I)
+IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|gif|svg|webp)$", re.I)
 
 # Library TUs relative to the cpp root, mirroring the vmecpp_sources list in
 # upstream's CMakeLists; vmec_standalone (the sole main()) last.
@@ -561,6 +583,101 @@ def write_pr_digest(path, repo, token, prov, cutoff):
     return n_open, len(prs) - n_open, n_outside
 
 
+def rebase_links(text, doc, copied, root, sha):
+    """The copied document `doc` with each relative link that names a file
+    outside `copied` pointed at that file on GitHub at commit `sha`: a picture
+    at its raw content, a directory at its tree, anything else at its page.
+    Fenced code and code spans are left alone. Returns the text and the number
+    of links rewritten."""
+    count = 0
+
+    def rebase(m):
+        nonlocal count
+        if m.group("code"):
+            return m.group(0)
+        target = m.group("target")
+        if re.match(r"[a-z][a-z0-9+.-]*:|#|//", target, re.I):
+            return m.group(0)
+        path, tail = re.match(r"([^?#]*)(.*)", target, re.S).groups()
+        full = posixpath.normpath(path[1:] if path.startswith("/") else
+                                  posixpath.join(posixpath.dirname(doc), path))
+        if not path or full in copied or full.split("/")[0] == "..":
+            return m.group(0)
+        kind = ("raw" if IMAGE_EXT_RE.search(full)
+                else "tree" if (root / full).is_dir() else "blob")
+        count += 1
+        return (f"{m.group('lead')}https://github.com/{UPSTREAM}/{kind}/{sha}/"
+                f"{'' if full == '.' else full}{tail}")
+
+    lines, fence = [], None
+    for line in text.split("\n"):
+        m = DOC_FENCE_RE.match(line)
+        if fence:
+            if (m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence)
+                    and not line[m.end():].strip()):
+                fence = None
+        elif m:
+            fence = m.group(1)
+        else:
+            line = DOC_REF_RE.sub(rebase, line)
+        lines.append(line)
+    return "\n".join(lines), count
+
+
+def replaceable(out):
+    """Whether `out` can be replaced by the copied documents: absent, or a
+    directory in which every file has the name of one of them."""
+    if not out.exists():
+        return True
+    return out.is_dir() and not out.is_symlink() and all(
+        p.name in DOC_NAMES for p in out.rglob("*")
+        if p.is_symlink() or not p.is_dir())
+
+
+def tracked_docs(root):
+    """The documents to copy from the checkout at `root`: DOC_FILES and every
+    AGENTS.md and CLAUDE.md it tracks, each path mapped to whether it is a
+    symbolic link."""
+    docs = {}
+    for line in git(root, "ls-files", "-s", "--", *DOC_PATHSPECS).splitlines():
+        meta, path = line.split("\t", 1)
+        docs[path] = meta.split()[0] == "120000"
+    return docs
+
+
+def copy_docs(root, docs, out, sha):
+    """Copy `docs` from the checkout at `root` into `out` at their paths in the
+    checkout, replacing what an earlier run wrote there. A symbolic link is
+    copied as a link, or as a plain file holding its target where the
+    repository holding `out` has core.symlinks off. Returns the number of
+    copies, of links among them and of rewritten links."""
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    links_as_files = git(out, "config", "--type=bool", "core.symlinks") == "false"
+    n_links = n_rebased = 0
+    for path, is_link in sorted(docs.items()):
+        src, dst = root / path, out / path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if is_link:
+            n_links += 1
+            target = (os.readlink(src) if src.is_symlink()
+                      else src.read_text(encoding="utf-8"))
+            if not links_as_files:
+                try:
+                    os.symlink(target, dst)
+                    continue
+                except OSError:
+                    pass
+            dst.write_text(target, encoding="utf-8", newline="\n")
+            continue
+        text, n = rebase_links(src.read_text(encoding="utf-8"), path, docs,
+                               root, sha)
+        n_rebased += n
+        dst.write_text(text, encoding="utf-8", newline="\n")
+    return len(docs), n_links, n_rebased
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -576,11 +693,14 @@ def main():
                     help="provenance string for the banner; default uses git")
     ap.add_argument("--prs-out", default=None, type=Path,
                     help="also write the digest of unmerged pull requests here")
-    ap.add_argument("--prs-repo", default="proximafusion/vmecpp",
+    ap.add_argument("--prs-repo", default=UPSTREAM,
                     help="GitHub repository the digest reads")
     ap.add_argument("--prs-cutoff", default="2026-04-25", type=date.fromisoformat,
                     help="leave closed pull requests opened before this date "
                          "(YYYY-MM-DD) out of the digest")
+    ap.add_argument("--docs-out", default=None, type=Path,
+                    help="also copy VMEC++'s README.md, its agent guides and "
+                         "the documents they require into this directory")
     args = ap.parse_args()
 
     cpp = args.cpp_root.resolve()
@@ -591,6 +711,20 @@ def main():
     if args.prs_out and not token:
         ap.error("--prs-out needs a GitHub token in GITHUB_TOKEN or GH_TOKEN, "
                  "or a logged-in gh")
+    if args.docs_out:
+        docs_root = git(cpp, "rev-parse", "--show-toplevel")
+        docs_sha = git(cpp, "rev-parse", "HEAD")
+        if not docs_root or not docs_sha:
+            ap.error("--docs-out needs the VMEC++ checkout to be a git "
+                     "repository")
+        docs = tracked_docs(Path(docs_root))
+        missing = [p for p in DOC_FILES if p not in docs]
+        if missing:
+            ap.error(f"--docs-out: the checkout does not track "
+                     f"{', '.join(missing)}")
+        if not replaceable(args.docs_out):
+            ap.error(f"--docs-out {args.docs_out} holds files other than "
+                     f"copied documents")
 
     inline_roots, extra_tus = build_inline_roots(cpp, abscab_root)
     abscab_inlined = any(p == "abscab/" for p, _ in inline_roots)
@@ -642,7 +776,7 @@ def main():
         prov = args.provenance
     else:
         desc = git(cpp, "describe", "--tags", "--always")
-        prov = f"github.com/proximafusion/vmecpp{(' ' + desc) if desc else ''}"
+        prov = f"github.com/{UPSTREAM}{(' ' + desc) if desc else ''}"
 
     banner = f"""// ============================================================================
 // VMEC++ - single-file C++ amalgamation
@@ -721,6 +855,9 @@ def main():
         n_open, n_closed, n_outside = write_pr_digest(
             args.prs_out, args.prs_repo, token, prov,
             args.prs_cutoff.isoformat())
+    if args.docs_out:
+        n_docs, n_links, n_rebased = copy_docs(
+            Path(docs_root), docs, args.docs_out.resolve(), docs_sha)
 
     n_lines = (banner + body).count("\n") + 1
     print(f"wrote {args.out}")
@@ -740,6 +877,10 @@ def main():
         print(f"    open / closed unmerged : {n_open} / {n_closed}")
         print(f"    outside the C++ core   : {n_outside}")
         print(f"    size                   : {args.prs_out.stat().st_size / 1024:.0f} KiB")
+    if args.docs_out:
+        print(f"  upstream documents       : {args.docs_out}")
+        print(f"    files / links          : {n_docs - n_links} / {n_links}")
+        print(f"    links rewritten        : {n_rebased}")
     if unresolved:
         print(f"  UNRESOLVED includes ({len(unresolved)}):")
         for rel, name in unresolved:

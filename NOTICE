@@ -9,15 +9,21 @@ Components
 
 VMEC++  -  https://github.com/proximafusion/vmecpp
     MIT License, Copyright (c) 2024-present Proxima Fusion GmbH.
-    Amalgamated from commit 5f4045db (v0.7.5-36-g5f4045db). The sources are
-    inlined with only mechanical transformations: project headers are pasted in
-    dependency order, and two optional paths are compiled out, the FFTX/SPIRAL
-    transform (guarded by VMECPP_USE_FFTX), which leaves the partial-DFT path
-    VMEC++ uses when FFTX is off, and the Enzyme autodiff translation units
-    (guarded by VMECPP_ENABLE_ENZYME). No algorithmic changes were made.
+    Amalgamated from the commit named on the Provenance line at the head of
+    vmecpp_amalgamated.cc. The sources are inlined with only mechanical
+    transformations: project headers are pasted in dependency order, and two
+    optional paths are compiled out, the FFTX/SPIRAL transform (guarded by
+    VMECPP_USE_FFTX), which leaves the partial-DFT path VMEC++ uses when FFTX
+    is off, and the Enzyme autodiff translation units (guarded by
+    VMECPP_ENABLE_ENZYME). No algorithmic changes were made.
     vmecpp_amalgamated.min.cc holds the same sources with comments and
     indentation removed; the per-file SPDX and copyright headers it drops are
-    restated in the single notice at its head.
+    restated in the single notice at its head. upstream/ holds VMEC++'s
+    README.md, VMECPP_NAMING_GUIDE.md, docs/fourier_basis_implementation.md
+    and AGENTS.md files with the CLAUDE.md links to them, copied from the same
+    commit at their paths in the repository; a relative link in them to a file
+    not copied is rewritten to point at that file in the repository at that
+    commit.
 
 abscab  -  https://github.com/jonathanschilling/abscab-cpp
     Apache License, Version 2.0, Copyright (c) Jonathan Schilling.

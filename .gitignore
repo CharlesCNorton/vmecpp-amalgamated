@@ -7,8 +7,8 @@ _deps/
 *.o
 *.obj
 *.a
-vmecpp
-vmecpp_min
+/vmecpp
+/vmecpp_min
 
 # VMEC++ run output
 *.out.h5
